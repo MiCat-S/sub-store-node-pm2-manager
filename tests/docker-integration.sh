@@ -35,12 +35,14 @@ export SUBSTORE_DATA_DIR=/var/lib/substore-test
 export SUBSTORE_PORT=39031
 export SUBSTORE_PM2_NAME=sub-store-integration
 export SUBSTORE_HOST=127.0.0.1
+export SUBSTORE_MAGIC_PATH=/integration-path
 
 bash /src/substore.sh install
 test -f /opt/substore-test/sub-store.bundle.js
 test -f /opt/substore-test/frontend/index.html
 test -f /var/lib/substore-test/root.json
 grep -Fq 'SUB_STORE_BACKEND_API_PORT="39031"' /opt/substore-test/.env
+grep -Fq 'SUB_STORE_FRONTEND_BACKEND_PATH="/integration-path"' /opt/substore-test/.env
 
 printf 'persistent-sentinel\n' >/var/lib/substore-test/sentinel.txt
 /usr/local/sbin/substore-test port 39032

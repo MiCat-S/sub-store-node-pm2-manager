@@ -32,6 +32,7 @@ sudo ./substore.sh
 - PM2 进程名，默认 `sub-store`
 - 监听地址，默认 `127.0.0.1`
 - 数据目录，默认 `<部署目录>/data`
+- 后端路径前缀 `SUB_STORE_FRONTEND_BACKEND_PATH`，默认自动生成随机值，也可自定义
 
 也可以执行：
 
@@ -49,6 +50,7 @@ sudo env \
   SUBSTORE_PORT=3000 \
   SUBSTORE_PM2_NAME=sub-store \
   SUBSTORE_HOST=127.0.0.1 \
+  SUBSTORE_MAGIC_PATH=/my-private-path \
   ./substore.sh install
 ```
 
@@ -121,6 +123,8 @@ http://127.0.0.1:端口/随机路径/api/utils/env
 ```
 
 `SUB_STORE_FRONTEND_BACKEND_PATH` 是路径前缀，不是登录密码。公网部署仍应配合 HTTPS、访问控制或 VPN。
+
+交互安装会显示一个随机默认路径，可以直接回车接受，也可以修改成自己的路径。官方实现只支持一个 `SUB_STORE_FRONTEND_BACKEND_PATH` 字符串，不支持用逗号等方式同时配置多个入口；以后可在 Env 管理中更换。
 
 ## 自定义端口
 

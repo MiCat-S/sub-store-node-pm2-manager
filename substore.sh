@@ -946,16 +946,18 @@ install_manager_command() {
 }
 
 new_install() {
-    local default_deploy default_data magic_path stage backend_stage frontend_zip frontend_stage
+    local default_deploy default_data default_magic_path magic_path stage backend_stage frontend_zip frontend_stage
     prepare_runtime
 
     default_deploy="${SUBSTORE_INSTALL_DIR:-/opt/sub-store}"
+    default_magic_path="/$(random_hex 16)"
     if [[ "${SUBSTORE_NON_INTERACTIVE:-0}" == 1 ]]; then
         DEPLOY_DIR="$default_deploy"
         PORT="${SUBSTORE_PORT:-3000}"
         PM2_NAME="${SUBSTORE_PM2_NAME:-sub-store}"
         HOST="${SUBSTORE_HOST:-127.0.0.1}"
         DATA_DIR="${SUBSTORE_DATA_DIR:-${DEPLOY_DIR}/data}"
+        magic_path="${SUBSTORE_MAGIC_PATH:-$default_magic_path}"
     else
         DEPLOY_DIR="$(prompt '部署目录' "$default_deploy")"
         PORT="$(prompt '监听端口' "${SUBSTORE_PORT:-3000}")"
@@ -963,12 +965,15 @@ new_install() {
         HOST="$(prompt '监听地址' "${SUBSTORE_HOST:-127.0.0.1}")"
         default_data="${DEPLOY_DIR}/data"
         DATA_DIR="$(prompt '持久化数据目录' "${SUBSTORE_DATA_DIR:-$default_data}")"
+        magic_path="$(prompt '后端路径前缀（SUB_STORE_FRONTEND_BACKEND_PATH）' "$default_magic_path")"
     fi
 
     validate_absolute_path "$DEPLOY_DIR" || die "部署目录必须是安全的绝对路径"
     validate_absolute_path "$DATA_DIR" || die "数据目录必须是安全的绝对路径"
     validate_env_value SUB_STORE_BACKEND_API_PORT "$PORT" || die "端口无效：$PORT"
     validate_env_value SUB_STORE_BACKEND_API_HOST "$HOST" || die "监听地址无效：$HOST"
+    validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH "$magic_path" || \
+        die "后端路径前缀必须以 / 开头，且只能包含字母、数字、点、下划线、波浪号和连字符"
     validate_pm2_name "$PM2_NAME" || die "PM2 名称只能包含字母、数字、点、下划线和连字符"
 
     if [[ -e "$DEPLOY_DIR" ]] && find "$DEPLOY_DIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
@@ -995,7 +1000,6 @@ new_install() {
     fi
     INSTALLED_AT="$(date -Iseconds)"
     NODE_BIN="$(command -v node)"
-    magic_path="/${SUBSTORE_MAGIC_PATH:-$(random_hex 16)}"
 
     mkdir -p -- "$DEPLOY_DIR" "$DATA_DIR" "${DEPLOY_DIR}/backups"
     chmod 755 "$DEPLOY_DIR"
