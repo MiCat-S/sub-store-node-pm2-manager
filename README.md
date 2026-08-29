@@ -691,6 +691,12 @@ raw.githubusercontent.com
 
 当前审计基线日期为 2026-08-29：后端 `2.36.40`、前端 `2.29.10`、官方 `.node-version` 为 `24.15.0`。脚本运行时会查询最新 Release，不会固定下载这些版本。
 
+## 许可证
+
+本管理脚本使用 [MIT License](LICENSE)。
+
+Sub-Store 前端、后端及下载的 Release 资产仍分别遵循其上游项目自己的许可证；本仓库的 MIT License 不会改变上游项目的授权条款。
+
 ## 测试
 
 项目包含：
