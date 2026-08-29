@@ -13,9 +13,9 @@
 - 更新前自动备份，失败时自动回滚
 - 安全卸载，不删除系统 Node.js、PM2 或其他项目
 
-项目地址：[Autlin/sub-store-node-pm2-manager](https://github.com/Autlin/sub-store-node-pm2-manager)
+项目地址：[MiCat-S/sub-store-node-pm2-manager](https://github.com/MiCat-S/sub-store-node-pm2-manager)
 
-📚 完整分步教程：[项目 Wiki](https://github.com/Autlin/sub-store-node-pm2-manager/wiki)
+📚 完整分步教程：[项目 Wiki](https://github.com/MiCat-S/sub-store-node-pm2-manager/wiki)
 
 > 💡 **第一次使用？** 准备一台 Debian/Ubuntu 服务器，复制下面的一行安装命令，然后按照中文提示操作即可。不确定的选项直接按 Enter 使用默认值。
 
@@ -37,16 +37,16 @@
 使用普通用户登录服务器时执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Autlin/sub-store-node-pm2-manager/main/substore.sh -o /tmp/substore.sh && chmod +x /tmp/substore.sh && sudo /tmp/substore.sh
+curl -fsSL https://raw.githubusercontent.com/MiCat-S/sub-store-node-pm2-manager/main/substore.sh -o /tmp/substore.sh && chmod +x /tmp/substore.sh && sudo /tmp/substore.sh
 ```
 
 如果当前已经是 `root`，可以去掉 `sudo`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Autlin/sub-store-node-pm2-manager/main/substore.sh -o /tmp/substore.sh && chmod +x /tmp/substore.sh && /tmp/substore.sh
+curl -fsSL https://raw.githubusercontent.com/MiCat-S/sub-store-node-pm2-manager/main/substore.sh -o /tmp/substore.sh && chmod +x /tmp/substore.sh && /tmp/substore.sh
 ```
 
-Raw 脚本地址：[substore.sh](https://raw.githubusercontent.com/Autlin/sub-store-node-pm2-manager/main/substore.sh)
+Raw 脚本地址：[substore.sh](https://raw.githubusercontent.com/MiCat-S/sub-store-node-pm2-manager/main/substore.sh)
 
 进入菜单后选择：
 
@@ -647,7 +647,7 @@ sudo substore logs
 更新管理器：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Autlin/sub-store-node-pm2-manager/main/substore.sh -o /tmp/substore.sh
+curl -fsSL https://raw.githubusercontent.com/MiCat-S/sub-store-node-pm2-manager/main/substore.sh -o /tmp/substore.sh
 bash -n /tmp/substore.sh
 sudo install -m 755 /tmp/substore.sh /usr/local/sbin/substore
 ```
