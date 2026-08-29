@@ -1,4 +1,4 @@
-# Sub-Store Node.js + PM2 一键管理脚本
+# 🚀 Sub-Store Node.js + PM2 一键管理脚本
 
 这是一个给 Debian、Ubuntu 和 Raspberry Pi ARM64 使用的 Sub-Store 管理脚本。
 
@@ -15,7 +15,9 @@
 
 项目地址：[Autlin/sub-store-node-pm2-manager](https://github.com/Autlin/sub-store-node-pm2-manager)
 
-## 开始前需要什么
+> 💡 **第一次使用？** 准备一台 Debian/Ubuntu 服务器，复制下面的一行安装命令，然后按照中文提示操作即可。不确定的选项直接按 Enter 使用默认值。
+
+## ✅ 开始前需要什么
 
 服务器需要满足：
 
@@ -28,7 +30,7 @@
 
 支持 Raspberry Pi ARM64，但系统必须是 Debian/Ubuntu ARM64。
 
-## 一行命令安装
+## ⚡ 一行命令安装
 
 使用普通用户登录服务器时执行：
 
@@ -62,7 +64,7 @@ Raw 脚本地址：[substore.sh](https://raw.githubusercontent.com/Autlin/sub-st
 sudo substore
 ```
 
-## 第一次安装怎么填写
+## 🧭 第一次安装怎么填写
 
 安装时会依次询问下面这些内容。不确定时可以直接按 Enter 使用默认值。
 
@@ -168,7 +170,7 @@ PM2 进程名称 [sub-store]:
 
 小白建议保持每 60 分钟检查一次。
 
-## 安装完成后会看到什么
+## 🎉 安装完成后会看到什么
 
 成功后脚本会显示类似：
 
@@ -195,7 +197,7 @@ pm2 status
 sub-store    online
 ```
 
-## 怎么打开网页
+## 🌐 怎么打开网页
 
 ### 使用 IP 直接访问
 
@@ -236,7 +238,7 @@ server {
 https://sub-store.example.com/?api=https://sub-store.example.com/随机路径
 ```
 
-## 日常使用
+## 🧰 日常使用
 
 打开中文管理菜单：
 
@@ -283,7 +285,7 @@ sudo substore
 | 查看版本 | `sudo substore version` |
 | 卸载 | `sudo substore uninstall` |
 
-## 自动更新
+## 🔄 自动更新
 
 安装时没有启用，或者需要修改间隔时运行：
 
@@ -333,7 +335,7 @@ journalctl -u substore-manager-update.service -n 100 --no-pager
 - 加入最多 5 分钟随机延迟
 - 手动更新和定时更新不会同时执行
 
-## 手动更新
+## ⬆️ 手动更新
 
 运行：
 
@@ -360,7 +362,7 @@ sudo substore update
 
 更新不会改变自定义端口、PM2 名称、`.env`、数据目录、前端目录或后端随机路径。
 
-## 修改前端目录
+## 🖥️ 修改前端目录
 
 首次安装时可以直接填写前端目录。
 
@@ -387,7 +389,7 @@ SUB_STORE_FRONTEND_PATH
 
 如果老部署的 `SUB_STORE_FRONTEND_BACKEND_PATH` 只存在于 PM2 环境而没有写入 `.env`，管理器会尝试自动读取并补全；仍然找不到时才会提示输入当前路径。
 
-## 修改端口
+## 🔌 修改端口
 
 运行：
 
@@ -403,7 +405,7 @@ SUB_STORE_BACKEND_API_PORT="3100"
 
 修改前会检查端口是否被占用。重启或健康检查失败时会自动恢复旧端口。
 
-## 管理多个 Sub-Store
+## 🧩 管理多个 Sub-Store
 
 原来的实例叫做 `default`。不带 `--instance` 时，所有命令都操作它：
 
@@ -458,7 +460,7 @@ second： substore-manager-update-second.timer
 
 更新、重启或卸载一个实例不会操作其他实例。
 
-## 导入已有的 Node.js + PM2 部署
+## 📥 导入已有的 Node.js + PM2 部署
 
 如果服务器已经通过 PM2 运行 `sub-store.bundle.js`，但没有管理器状态文件，选择安装时会提示是否导入。
 
@@ -466,7 +468,7 @@ second： substore-manager-update-second.timer
 
 如果服务器有多个未管理的 Sub-Store PM2 进程，脚本会列出来供选择。已经被其他管理实例记录的 PM2 进程不会重复导入。
 
-## Env 是什么
+## ⚙️ Env 是什么
 
 Env 是 Sub-Store 的环境变量配置，保存在：
 
@@ -512,7 +514,7 @@ SUB_STORE_MMDB_*
 
 涉及路径、端口、URL、代理、CORS 和 cron 的值会做基本格式检查。敏感值只显示部分内容。修改后启动失败会恢复旧 `.env`。
 
-## 文件放在哪里
+## 📁 文件放在哪里
 
 默认目录：
 
@@ -540,7 +542,7 @@ SUB_STORE_MMDB_*
 
 可选 MMDB 文件由 `SUB_STORE_MMDB_COUNTRY_PATH` 和 `SUB_STORE_MMDB_ASN_PATH` 指定。
 
-## Node.js 和 PM2 怎么安装
+## 🟢 Node.js 和 PM2 怎么安装
 
 脚本读取 Sub-Store 官方 `.node-version`，只使用其中的主版本选择 NodeSource 安装通道。
 
@@ -562,13 +564,13 @@ npm install -g pm2@latest
 
 安装后会执行 `pm2 save` 并配置 `pm2-root.service` 开机启动。
 
-## 为什么不用 pnpm install
+## 📦 为什么不用 pnpm install
 
 官方 Release 已经提供构建完成的 `sub-store.bundle.js`，后端运行依赖已经由官方构建流程打包进去。
 
 因此服务器不需要克隆后端源码，也不需要执行 `pnpm install`。前端 `dist.zip` 同样是构建完成的静态文件，下载并解压即可。
 
-## 卸载
+## 🗑️ 卸载
 
 卸载默认实例：
 
@@ -586,7 +588,7 @@ sudo substore --instance second uninstall
 
 数据默认保留。选择删除数据时，需要输入带实例 ID 的二次确认。只有由管理器新建的数据目录才允许自动删除；安装前已经存在或从旧实例导入的数据目录不会自动删除。
 
-## 非交互安装
+## 🤖 非交互安装
 
 高级用户可以直接传入参数：
 
@@ -617,7 +619,7 @@ sudo env \
 
 这些 `SUBSTORE_*` 变量只控制管理器安装过程。真正传递给 Sub-Store 的变量仍然是 `.env` 中的 `SUB_STORE_*`。
 
-## 常见问题
+## 🩺 常见问题
 
 ### 提示端口已被占用
 
@@ -679,7 +681,7 @@ raw.githubusercontent.com
 
 低频更新通常不需要 GitHub Token。需要 Token 时只在当前 Shell 环境中导出，不要写入仓库或日志。
 
-## 实现依据
+## 📚 实现依据
 
 本管理器不是把 Sub-Store 当作普通 Node.js 项目套模板。实现依据包括：
 
@@ -691,13 +693,13 @@ raw.githubusercontent.com
 
 当前审计基线日期为 2026-08-29：后端 `2.36.40`、前端 `2.29.10`、官方 `.node-version` 为 `24.15.0`。脚本运行时会查询最新 Release，不会固定下载这些版本。
 
-## 许可证
+## 📄 许可证
 
 本管理脚本使用 [MIT License](LICENSE)。
 
 Sub-Store 前端、后端及下载的 Release 资产仍分别遵循其上游项目自己的许可证；本仓库的 MIT License 不会改变上游项目的授权条款。
 
-## 测试
+## 🧪 测试
 
 项目包含：
 
