@@ -11,6 +11,9 @@ FRONTEND_ASSET="dist.zip"
 STATE_ROOT="${SUBSTORE_MANAGER_STATE_DIR:-/etc/substore-manager}"
 STATE_FILE="${STATE_ROOT}/instance.conf"
 MANAGER_INSTALL_PATH="${SUBSTORE_MANAGER_INSTALL_PATH:-/usr/local/sbin/substore}"
+SYSTEMD_DIR="${SUBSTORE_MANAGER_SYSTEMD_DIR:-/etc/systemd/system}"
+AUTO_UPDATE_SERVICE_NAME="substore-manager-update.service"
+AUTO_UPDATE_TIMER_NAME="substore-manager-update.timer"
 GITHUB_API_BASE="${SUBSTORE_MANAGER_GITHUB_API_BASE:-https://api.github.com}"
 SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
 
@@ -33,6 +36,9 @@ BACKEND_VERSION=""
 FRONTEND_VERSION=""
 NODE_BIN=""
 INSTALLED_AT=""
+AUTO_UPDATE_ENABLED=0
+AUTO_UPDATE_INTERVAL_MINUTES=60
+UPDATE_LOCK_HELD=0
 TMP_PATHS=()
 
 declare -a OFFICIAL_ENV_ORDER=()
@@ -527,6 +533,8 @@ save_state() {
         printf 'FRONTEND_VERSION=%s\n' "$(shell_quote "$FRONTEND_VERSION")"
         printf 'NODE_BIN=%s\n' "$(shell_quote "$NODE_BIN")"
         printf 'INSTALLED_AT=%s\n' "$(shell_quote "$INSTALLED_AT")"
+        printf 'AUTO_UPDATE_ENABLED=%s\n' "$(shell_quote "$AUTO_UPDATE_ENABLED")"
+        printf 'AUTO_UPDATE_INTERVAL_MINUTES=%s\n' "$(shell_quote "$AUTO_UPDATE_INTERVAL_MINUTES")"
     } >"$temp"
     chmod 600 "$temp"
     mv -f -- "$temp" "$STATE_FILE"
@@ -546,6 +554,8 @@ load_state() {
     source "$STATE_FILE"
     DATA_CREATED_BY_MANAGER="${DATA_CREATED_BY_MANAGER:-0}"
     FRONTEND_CREATED_BY_MANAGER="${FRONTEND_CREATED_BY_MANAGER:-0}"
+    AUTO_UPDATE_ENABLED="${AUTO_UPDATE_ENABLED:-0}"
+    AUTO_UPDATE_INTERVAL_MINUTES="${AUTO_UPDATE_INTERVAL_MINUTES:-60}"
     [[ -n "$INSTALL_ID" && -n "$DEPLOY_DIR" && -n "$PM2_NAME" ]] || die "状态文件不完整：$STATE_FILE"
     [[ -f "$MARKER_FILE" ]] || die "实例标记不存在：$MARKER_FILE"
     grep -Fxq "$INSTALL_ID" "$MARKER_FILE" || die "实例标记与状态文件不匹配"
@@ -579,7 +589,7 @@ ensure_base_packages() {
     if [[ "${SUBSTORE_MANAGER_SKIP_PACKAGES:-0}" == 1 ]]; then
         return 0
     fi
-    for command_name in curl gpg unzip tar xz ss ps sha256sum; do
+    for command_name in curl gpg unzip tar xz ss ps sha256sum flock; do
         if ! command -v "$command_name" >/dev/null 2>&1; then
             missing=1
             break
@@ -589,7 +599,7 @@ ensure_base_packages() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y --no-install-recommends \
-        apt-transport-https ca-certificates curl gnupg unzip tar xz-utils iproute2 procps
+        apt-transport-https ca-certificates curl gnupg unzip tar xz-utils iproute2 procps util-linux
 }
 
 curl_args() {
@@ -674,6 +684,182 @@ configure_pm2_startup() {
     fi
     pm2 startup systemd -u root --hp /root >/dev/null
     log_info "已配置 PM2 systemd 开机启动"
+}
+
+validate_auto_update_interval() {
+    local value="$1"
+    [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 5 && value <= 10080 ))
+}
+
+write_auto_update_units() {
+    local service_file timer_file
+    validate_auto_update_interval "$AUTO_UPDATE_INTERVAL_MINUTES" || \
+        die "自动更新间隔必须是 5 到 10080 分钟"
+    [[ "$MANAGER_INSTALL_PATH" != *$'\n'* && "$MANAGER_INSTALL_PATH" != *[[:space:]]* ]] || \
+        die "自动更新要求管理器安装路径不包含空白字符"
+
+    mkdir -p -- "$SYSTEMD_DIR"
+    service_file="${SYSTEMD_DIR}/${AUTO_UPDATE_SERVICE_NAME}"
+    timer_file="${SYSTEMD_DIR}/${AUTO_UPDATE_TIMER_NAME}"
+
+    {
+        printf '%s\n' \
+            '[Unit]' \
+            'Description=Check and update Sub-Store backend and frontend' \
+            'Wants=network-online.target' \
+            'After=network-online.target' \
+            '' \
+            '[Service]' \
+            'Type=oneshot' \
+            'Environment="HOME=/root"' \
+            'Environment="PM2_HOME=/root/.pm2"' \
+            'Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+            "ExecStart=${MANAGER_INSTALL_PATH} update" \
+            'Nice=10' \
+            'TimeoutStartSec=30min'
+    } >"$service_file"
+
+    {
+        printf '%s\n' \
+            '[Unit]' \
+            'Description=Periodic Sub-Store update check' \
+            '' \
+            '[Timer]' \
+            'OnBootSec=10min' \
+            "OnUnitActiveSec=${AUTO_UPDATE_INTERVAL_MINUTES}min" \
+            'RandomizedDelaySec=5min' \
+            'AccuracySec=1min' \
+            "Unit=${AUTO_UPDATE_SERVICE_NAME}" \
+            '' \
+            '[Install]' \
+            'WantedBy=timers.target'
+    } >"$timer_file"
+    chmod 644 "$service_file" "$timer_file"
+}
+
+enable_auto_update() {
+    local interval="${1:-$AUTO_UPDATE_INTERVAL_MINUTES}"
+    require_root
+    load_state || die "尚未安装或导入 Sub-Store"
+    validate_auto_update_interval "$interval" || die "自动更新间隔必须是 5 到 10080 分钟"
+    command -v systemctl >/dev/null 2>&1 || die "当前系统没有 systemctl，无法启用定时更新"
+    AUTO_UPDATE_INTERVAL_MINUTES="$interval"
+    install_manager_command
+    write_auto_update_units
+    systemctl daemon-reload
+    systemctl enable --now "$AUTO_UPDATE_TIMER_NAME"
+    systemctl restart "$AUTO_UPDATE_TIMER_NAME"
+    AUTO_UPDATE_ENABLED=1
+    save_state
+    log_info "已启用自动更新：每 ${AUTO_UPDATE_INTERVAL_MINUTES} 分钟检查一次"
+}
+
+disable_auto_update() {
+    require_root
+    load_state || die "尚未安装或导入 Sub-Store"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now "$AUTO_UPDATE_TIMER_NAME" >/dev/null 2>&1 || true
+    fi
+    AUTO_UPDATE_ENABLED=0
+    save_state
+    log_info "自动更新已停用"
+}
+
+remove_auto_update_units() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now "$AUTO_UPDATE_TIMER_NAME" >/dev/null 2>&1 || true
+    fi
+    rm -f -- \
+        "${SYSTEMD_DIR}/${AUTO_UPDATE_SERVICE_NAME}" \
+        "${SYSTEMD_DIR}/${AUTO_UPDATE_TIMER_NAME}"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+}
+
+show_auto_update_status() {
+    load_state || die "尚未安装或导入 Sub-Store"
+    printf '配置状态：%s\n' "$([[ "$AUTO_UPDATE_ENABLED" == 1 ]] && printf '已启用' || printf '已停用')"
+    printf '检查间隔：%s 分钟\n' "$AUTO_UPDATE_INTERVAL_MINUTES"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl status "$AUTO_UPDATE_TIMER_NAME" --no-pager || true
+        systemctl list-timers "$AUTO_UPDATE_TIMER_NAME" --no-pager || true
+    fi
+}
+
+show_auto_update_logs() {
+    command -v journalctl >/dev/null 2>&1 || die "当前系统没有 journalctl"
+    journalctl -u "$AUTO_UPDATE_SERVICE_NAME" -n 100 --no-pager
+}
+
+configure_auto_update_after_install() {
+    local interval
+    if [[ "${SUBSTORE_MANAGER_SKIP_AUTO_UPDATE:-0}" == 1 ]]; then
+        log_warn "测试模式：跳过自动更新 timer 配置"
+        return 0
+    fi
+    if [[ "${SUBSTORE_NON_INTERACTIVE:-0}" == 1 ]]; then
+        if [[ "${SUBSTORE_AUTO_UPDATE:-0}" == 1 ]]; then
+            enable_auto_update "${SUBSTORE_AUTO_UPDATE_MINUTES:-60}"
+        fi
+        return 0
+    fi
+    if confirm "是否启用定时自动检查并更新前端和后端" Y; then
+        interval="$(prompt '检查间隔（分钟，最小 5）' '60')"
+        enable_auto_update "$interval"
+    fi
+}
+
+auto_update_menu() {
+    local interval
+    load_state || die "尚未安装或导入 Sub-Store"
+    while true; do
+        printf '\n%s========== 自动更新 ==========%s\n' "$C_BOLD" "$C_RESET"
+        printf '1. 启用或修改检查间隔\n2. 停用自动更新\n3. 查看状态与下次执行时间\n4. 查看自动更新日志\n5. 立即检查更新\n0. 返回\n'
+        case "$(prompt '请选择')" in
+            1)
+                interval="$(prompt '检查间隔（分钟，最小 5）' "$AUTO_UPDATE_INTERVAL_MINUTES")"
+                enable_auto_update "$interval"
+                pause
+                ;;
+            2) disable_auto_update; pause ;;
+            3) show_auto_update_status; pause ;;
+            4) show_auto_update_logs; pause ;;
+            5) update_instance; pause ;;
+            0) return ;;
+            *) log_warn "无效选项" ;;
+        esac
+    done
+}
+
+acquire_update_lock() {
+    mkdir -p -- "$STATE_ROOT"
+    exec 9>"${STATE_ROOT}/update.lock"
+    if ! flock -n 9; then
+        log_warn "另一个更新任务正在运行，本次检查跳过"
+        exec 9>&-
+        return 1
+    fi
+    UPDATE_LOCK_HELD=1
+}
+
+acquire_update_lock_wait() {
+    mkdir -p -- "$STATE_ROOT"
+    exec 9>"${STATE_ROOT}/update.lock"
+    log_info "等待正在执行的更新任务结束"
+    if ! flock -w 1800 9; then
+        exec 9>&-
+        die "等待更新任务结束超时，已取消当前操作"
+    fi
+    UPDATE_LOCK_HELD=1
+}
+
+release_update_lock() {
+    if [[ "$UPDATE_LOCK_HELD" == 1 ]]; then
+        flock -u 9 || true
+        exec 9>&-
+        UPDATE_LOCK_HELD=0
+    fi
 }
 
 release_info() {
@@ -1091,6 +1277,7 @@ new_install() {
     configure_pm2_startup
     pm2 save >/dev/null
     install_manager_command
+    configure_auto_update_after_install
 
     log_info "Sub-Store 安装完成"
     printf '部署目录：%s\n' "$DEPLOY_DIR"
@@ -1182,6 +1369,7 @@ import_existing() {
     write_ecosystem
     save_state
     install_manager_command
+    configure_auto_update_after_install
     log_info "已导入现有实例，不修改程序、数据和 Env"
 }
 
@@ -1274,6 +1462,7 @@ update_instance() {
     require_root
     load_state || die "尚未安装或导入 Sub-Store"
     prepare_runtime
+    acquire_update_lock || return 0
 
     BACKEND_VERSION="$(backend_version_from_file "$BACKEND_FILE" || printf 'unknown')"
     release_info "$BACKEND_REPO" "$BACKEND_ASSET"
@@ -1293,6 +1482,7 @@ update_instance() {
     printf '前端：%s -> %s\n' "$FRONTEND_VERSION" "$FRONTEND_LATEST"
     if (( need_backend == 0 && need_frontend == 0 )); then
         log_info "已经是最新版本"
+        release_update_lock
         return 0
     fi
 
@@ -1334,6 +1524,7 @@ update_instance() {
     BACKEND_VERSION="$BACKEND_LATEST"
     FRONTEND_VERSION="$FRONTEND_LATEST"
     sync_state_from_env
+    release_update_lock
     log_info "更新完成：后端 $BACKEND_VERSION，前端 $FRONTEND_VERSION"
 }
 
@@ -1687,6 +1878,8 @@ uninstall_instance() {
         remove_data=1
     fi
 
+    remove_auto_update_units
+    acquire_update_lock_wait
     delete_pm2_instance
     if (( remove_data )); then
         data_marker="${DATA_DIR}/.substore-manager-data"
@@ -1707,7 +1900,8 @@ uninstall_instance() {
         rm -f -- "$ECOSYSTEM_FILE" "$MARKER_FILE" "$(frontend_marker_path)"
         log_info "导入实例的程序、Env、前端和数据均已保留"
     fi
-    rm -f -- "$STATE_FILE"
+    release_update_lock
+    rm -f -- "$STATE_FILE" "${STATE_ROOT}/update.lock"
     rmdir -- "$STATE_ROOT" 2>/dev/null || true
     log_info "卸载完成；系统 Node.js、全局 PM2 和其他 PM2 进程未被删除"
 }
@@ -1735,6 +1929,7 @@ manager_menu() {
 10. 查看当前配置
 11. 查看当前版本
 12. 卸载 Sub-Store
+13. 自动更新设置
 0. 退出
 EOF
         case "$(prompt '请选择')" in
@@ -1750,6 +1945,7 @@ EOF
             10) show_config; pause ;;
             11) show_version; pause ;;
             12) uninstall_instance; pause ;;
+            13) auto_update_menu ;;
             0) return ;;
             *) log_warn "无效选项" ;;
         esac
@@ -1769,6 +1965,7 @@ Usage:
   substore.sh port [新端口]
   substore.sh env             Env 管理菜单
   substore.sh config|version
+  substore.sh auto            自动更新设置
   substore.sh uninstall
 EOF
 }
@@ -1788,6 +1985,7 @@ main() {
         env) require_root; env_menu ;;
         config) show_config ;;
         version) show_version ;;
+        auto) require_root; auto_update_menu ;;
         uninstall) uninstall_instance ;;
         --help|-h|help) usage ;;
         *) usage >&2; exit 2 ;;

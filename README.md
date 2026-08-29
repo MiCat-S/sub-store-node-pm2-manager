@@ -79,6 +79,8 @@ sudo env \
   SUBSTORE_PM2_NAME=sub-store \
   SUBSTORE_HOST=127.0.0.1 \
   SUBSTORE_MAGIC_PATH=/my-private-path \
+  SUBSTORE_AUTO_UPDATE=1 \
+  SUBSTORE_AUTO_UPDATE_MINUTES=60 \
   ./substore.sh install
 ```
 
@@ -229,6 +231,64 @@ sudo substore update
 ```
 
 更新不会删除部署目录，不会覆盖 `.env`、数据目录、自定义端口或 PM2 名称。Release bundle 不使用服务器端 `node_modules`，因此没有需要重新安装的项目依赖；脚本仍会重新检查官方 Node 构建基线。
+
+## 定时自动更新
+
+交互安装完成后，管理器会询问是否启用定时自动检查，默认检查间隔为 60 分钟。也可以随时运行：
+
+```bash
+sudo substore auto
+```
+
+菜单提供：
+
+```text
+1. 启用或修改检查间隔
+2. 停用自动更新
+3. 查看状态与下次执行时间
+4. 查看自动更新日志
+5. 立即检查更新
+0. 返回
+```
+
+调度使用 systemd timer，而不是再启动一个常驻 PM2 updater：
+
+```text
+substore-manager-update.timer
+└── substore-manager-update.service
+    └── /usr/local/sbin/substore update
+```
+
+默认行为：
+
+- 开机约 10 分钟后首次检查
+- 此后按配置间隔检查，默认 60 分钟
+- 最多加入 5 分钟随机延迟，避免大量实例同时请求 GitHub
+- 没有新版本时不重启 Sub-Store
+- 有更新时同时检查并更新后端和前端
+- 更新前备份程序、前端、Env、PM2 配置和数据
+- 更新失败时自动回滚
+- 使用文件锁，定时更新与手工 `substore update` 不会并发执行
+
+查看 timer：
+
+```bash
+systemctl status substore-manager-update.timer
+systemctl list-timers substore-manager-update.timer
+```
+
+查看自动更新日志：
+
+```bash
+journalctl -u substore-manager-update.service -n 100 --no-pager
+```
+
+非交互安装只有显式设置下面两个管理器参数时才会启用定时更新：
+
+```bash
+SUBSTORE_AUTO_UPDATE=1
+SUBSTORE_AUTO_UPDATE_MINUTES=60
+```
 
 ## PM2 管理
 

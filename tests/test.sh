@@ -19,6 +19,7 @@ fail() {
 
 export SUBSTORE_MANAGER_LIBRARY_ONLY=1
 export SUBSTORE_MANAGER_STATE_DIR="$TEST_ROOT/state"
+export SUBSTORE_MANAGER_SYSTEMD_DIR="$TEST_ROOT/systemd"
 export SUBSTORE_MANAGER_SKIP_STATE_SECURITY=1
 source "$SCRIPT"
 init_env_catalog
@@ -83,6 +84,8 @@ CREATED_BY_MANAGER=1
 DATA_CREATED_BY_MANAGER=1
 FRONTEND_CREATED_BY_MANAGER=1
 INSTALLED_AT=2026-08-29T00:00:00+00:00
+AUTO_UPDATE_ENABLED=1
+AUTO_UPDATE_INTERVAL_MINUTES=90
 mkdir -p "$DEPLOY_DIR" "$DATA_DIR"
 printf '%s\n' "$INSTALL_ID" >"$MARKER_FILE"
 write_ecosystem
@@ -96,7 +99,15 @@ load_state || fail "load state"
 [[ "$PM2_NAME" == sub-store-test ]] || fail "state PM2 name"
 [[ "$DATA_CREATED_BY_MANAGER" == 1 ]] || fail "state data ownership"
 [[ "$FRONTEND_CREATED_BY_MANAGER" == 1 ]] || fail "state frontend ownership"
+[[ "$AUTO_UPDATE_ENABLED" == 1 ]] || fail "state auto-update enabled"
+[[ "$AUTO_UPDATE_INTERVAL_MINUTES" == 90 ]] || fail "state auto-update interval"
 grep -Fq '"watch": false' "$ECOSYSTEM_FILE" || fail "PM2 watch disabled"
 grep -Fq '"cwd":' "$ECOSYSTEM_FILE" || fail "PM2 cwd missing"
 
-printf 'PASS: env parser, validation, state persistence and PM2 config\n'
+write_auto_update_units
+grep -Fq 'ExecStart=/usr/local/sbin/substore update' "$TEST_ROOT/systemd/substore-manager-update.service" || fail "auto-update service command"
+grep -Fq 'OnUnitActiveSec=90min' "$TEST_ROOT/systemd/substore-manager-update.timer" || fail "auto-update interval"
+validate_auto_update_interval 5 || fail "minimum auto-update interval"
+if validate_auto_update_interval 4; then fail "invalid auto-update interval"; fi
+
+printf 'PASS: env parser, validation, state persistence, PM2 config and update timer\n'

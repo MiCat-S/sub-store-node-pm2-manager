@@ -29,6 +29,7 @@ fi
 export SUBSTORE_MANAGER_STATE_DIR=/etc/substore-manager-test
 export SUBSTORE_MANAGER_INSTALL_PATH=/usr/local/sbin/substore-test
 export SUBSTORE_MANAGER_SKIP_PM2_STARTUP=1
+export SUBSTORE_MANAGER_SKIP_AUTO_UPDATE=1
 export SUBSTORE_NON_INTERACTIVE=1
 export SUBSTORE_INSTALL_DIR=/opt/substore-test
 export SUBSTORE_DATA_DIR=/var/lib/substore-test
