@@ -84,7 +84,9 @@ sudo env \
 
 ## Node.js 与 PM2
 
-脚本读取官方 `.node-version`。缺少合适 Node.js 时，在 Debian/Ubuntu 上通过 NodeSource 安装对应 Node 主版本；支持 `amd64` 和 `arm64`。已有同主版本且不低于官方构建基线的 Node.js 会被复用。脚本不会自动降级更高主版本，以免影响服务器上的其他项目；确认兼容时可显式设置 `SUBSTORE_ALLOW_NEWER_NODE=1`。
+脚本读取官方 `.node-version`。缺少合适 Node.js 时，会下载并执行 NodeSource 官方 `setup_<主版本>.x` 一键配置脚本，再通过 APT 安装 `nodejs`；支持 `amd64` 和 `arm64`。NodeSource 脚本会先保存到临时文件并通过 `bash -n` 检查，不直接使用不可检查的管道执行。
+
+已有同主版本且不低于官方构建基线的 Node.js 会被复用。脚本不会自动降级更高主版本，以免影响服务器上的其他项目；确认兼容时可显式设置 `SUBSTORE_ALLOW_NEWER_NODE=1`。
 
 PM2 不存在时使用 npm 全局安装。PM2 配置固定：
 
@@ -277,3 +279,9 @@ TEST_PLATFORM=linux/arm64 ./tests/docker-integration.sh
 ```
 
 它会验证实际 Release 下载、PM2 启动、Env 加载、自定义端口、成功更新、失败回滚、数据保留和安全卸载。
+
+额外验证 NodeSource 一键安装流程：
+
+```bash
+TEST_NODE_INSTALL=1 ./tests/docker-integration.sh
+```

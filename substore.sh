@@ -601,7 +601,7 @@ official_node_version() {
 }
 
 ensure_node() {
-    local required_version required_major installed_version installed_major key_tmp
+    local required_version required_major installed_version installed_major setup_script
     required_version="$(official_node_version)"
     required_major="${required_version%%.*}"
 
@@ -626,29 +626,12 @@ ensure_node() {
     fi
 
     [[ "${SUBSTORE_MANAGER_SKIP_NODE_INSTALL:-0}" != 1 ]] || die "测试模式禁止安装 Node.js"
-    key_tmp="$(mktemp)"
-    register_tmp "$key_tmp"
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o "$key_tmp"
-    install -d -m 0755 /usr/share/keyrings
-    rm -f /usr/share/keyrings/nodesource.gpg \
-        /etc/apt/sources.list.d/nodesource.list \
-        /etc/apt/sources.list.d/nodesource.sources
-    gpg --dearmor --yes -o /usr/share/keyrings/nodesource.gpg "$key_tmp"
-    chmod 644 /usr/share/keyrings/nodesource.gpg
-    printf '%s\n' \
-        'Types: deb' \
-        "URIs: https://deb.nodesource.com/node_${required_major}.x" \
-        'Suites: nodistro' \
-        'Components: main' \
-        "Architectures: $(dpkg --print-architecture)" \
-        'Signed-By: /usr/share/keyrings/nodesource.gpg' \
-        >/etc/apt/sources.list.d/nodesource.sources
-    printf '%s\n' \
-        'Package: nodejs' \
-        'Pin: origin deb.nodesource.com' \
-        'Pin-Priority: 600' \
-        >/etc/apt/preferences.d/nodejs
-    apt-get update
+    setup_script="$(mktemp)"
+    register_tmp "$setup_script"
+    curl -fsSL --retry 3 "https://deb.nodesource.com/setup_${required_major}.x" -o "$setup_script"
+    bash -n "$setup_script" || die "NodeSource setup_${required_major}.x 语法检查失败"
+    log_info "执行 NodeSource setup_${required_major}.x 一键配置脚本"
+    bash "$setup_script"
     apt-get install -y nodejs
     hash -r
     NODE_BIN="$(command -v node)"

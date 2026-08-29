@@ -4,17 +4,28 @@ set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PLATFORM="${TEST_PLATFORM:-linux/amd64}"
+TEST_NODE_INSTALL="${TEST_NODE_INSTALL:-0}"
+
+if [[ "$TEST_NODE_INSTALL" == 1 ]]; then
+    IMAGE="ubuntu:24.04"
+else
+    IMAGE="node:24-bookworm"
+fi
 
 docker run --rm -i --platform "$PLATFORM" \
+    -e TEST_NODE_INSTALL="$TEST_NODE_INSTALL" \
     -v "$ROOT:/src:ro" \
-    node:24-bookworm \
+    "$IMAGE" \
     bash -s <<'CONTAINER'
 set -Eeuo pipefail
 
-apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 >/dev/null
-
-export SUBSTORE_MANAGER_SKIP_PACKAGES=1
+if [[ "$TEST_NODE_INSTALL" == 1 ]]; then
+    export SUBSTORE_MANAGER_SKIP_PACKAGES=0
+else
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 >/dev/null
+    export SUBSTORE_MANAGER_SKIP_PACKAGES=1
+fi
 export SUBSTORE_MANAGER_STATE_DIR=/etc/substore-manager-test
 export SUBSTORE_MANAGER_INSTALL_PATH=/usr/local/sbin/substore-test
 export SUBSTORE_MANAGER_SKIP_PM2_STARTUP=1
