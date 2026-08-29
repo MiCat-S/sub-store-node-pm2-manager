@@ -22,7 +22,31 @@
 
 ## 一键安装
 
+直接下载并启动管理器：
+
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Autlin/sub-store-node-pm2-manager/main/substore.sh -o /tmp/substore.sh && chmod +x /tmp/substore.sh && sudo /tmp/substore.sh
+```
+
+Raw 脚本地址：[substore.sh](https://raw.githubusercontent.com/Autlin/sub-store-node-pm2-manager/main/substore.sh)
+
+首次部署成功后，管理器会安装为：
+
+```text
+/usr/local/sbin/substore
+```
+
+以后直接运行：
+
+```bash
+sudo substore
+```
+
+也可以克隆仓库后运行：
+
+```bash
+git clone https://github.com/Autlin/sub-store-node-pm2-manager.git
+cd sub-store-node-pm2-manager
 chmod +x substore.sh
 sudo ./substore.sh
 ```
