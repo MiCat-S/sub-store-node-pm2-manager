@@ -37,10 +37,18 @@ if env_get "$ENV_FILE" SUB_STORE_PUSH_SERVICE >/dev/null 2>&1; then fail "env de
 validate_env_value SUB_STORE_BACKEND_API_PORT 65535 || fail "valid port"
 if validate_env_value SUB_STORE_BACKEND_API_PORT 65536; then fail "invalid port"; fi
 validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH /abc-123 || fail "valid prefix"
+validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH /api/sub-store/ || fail "valid nested prefix"
 if validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH abc; then fail "invalid prefix"; fi
 validate_env_value SUB_STORE_BODY_JSON_LIMIT 10mb || fail "valid body limit"
 validate_env_value SUB_STORE_CORS_ALLOWED_ORIGINS 'https://a.example,http://127.0.0.1:3000' || fail "valid cors"
 validate_env_value SUB_STORE_PRODUCE_CRON '0 */2 * * *,sub,a;0 */3 * * *,col,b' || fail "valid produce cron"
+
+mkdir -p "$TEST_ROOT/frontend"
+touch "$TEST_ROOT/frontend/index.html"
+env_set "$ENV_FILE" SUB_STORE_BACKEND_MERGE true
+env_set "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH /api/sub-store/
+env_set "$ENV_FILE" SUB_STORE_FRONTEND_PATH "$TEST_ROOT/frontend"
+validate_env_consistency || fail "merged frontend with nested prefix"
 
 DEPLOY_DIR="$TEST_ROOT/deploy"
 BACKEND_FILE="$DEPLOY_DIR/sub-store.bundle.js"

@@ -350,7 +350,7 @@ validate_env_value() {
             [[ "$value" == true ]]
             ;;
         prefix)
-            [[ "$value" =~ ^/[A-Za-z0-9._~-]+$ ]]
+            [[ "$value" == /* ]]
             ;;
         positive_int)
             [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 ))
@@ -1002,7 +1002,7 @@ new_install() {
     validate_env_value SUB_STORE_BACKEND_API_PORT "$PORT" || die "端口无效：$PORT"
     validate_env_value SUB_STORE_BACKEND_API_HOST "$HOST" || die "监听地址无效：$HOST"
     validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH "$magic_path" || \
-        die "后端路径前缀必须以 / 开头，且只能包含字母、数字、点、下划线、波浪号和连字符"
+        die "后端路径前缀必须以 / 开头"
     validate_pm2_name "$PM2_NAME" || die "PM2 名称只能包含字母、数字、点、下划线和连字符"
 
     if [[ -e "$DEPLOY_DIR" ]] && find "$DEPLOY_DIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
