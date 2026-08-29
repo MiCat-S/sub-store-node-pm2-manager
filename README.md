@@ -116,6 +116,53 @@ sudo env \
 
 它记录部署目录、Env、数据路径、PM2 名称、端口、Node 路径和版本，不把实例参数散落在脚本中。
 
+## 多实例管理
+
+不带实例参数时使用兼容旧版本的 `default` 实例，其状态仍保存在：
+
+```text
+/etc/substore-manager/instance.conf
+```
+
+新增实例使用 `--instance`：
+
+```bash
+sudo substore --instance second install
+sudo substore --instance second update
+sudo substore --instance second env
+sudo substore --instance second auto
+sudo substore --instance second uninstall
+```
+
+命名实例的状态保存在：
+
+```text
+/etc/substore-manager/instances/second/instance.conf
+```
+
+查看全部实例：
+
+```bash
+sudo substore instances
+```
+
+每个实例拥有独立的：
+
+- 部署目录、前端目录、数据目录和 `.env`
+- PM2 进程名称和监听端口
+- 后端/前端版本状态
+- 更新备份和文件锁
+- 自动更新 service/timer
+
+例如 `second` 实例的 timer 为：
+
+```text
+substore-manager-update-second.service
+substore-manager-update-second.timer
+```
+
+不同实例必须使用不同的 PM2 名称和监听端口。默认建议路径会自动变成 `/opt/sub-store-second`，默认 PM2 名称会变成 `sub-store-second`，仍可在安装时修改。
+
 ## Node.js 与 PM2
 
 脚本读取官方 `.node-version`，只取其中的主版本来选择 NodeSource 安装通道，例如 `.node-version` 为 `24.15.0` 时使用 `setup_24.x`。它不会把补丁版本 `24.15.0` 固定成安装目标；APT 最终安装 NodeSource 仓库当前提供的 Node 24 版本。

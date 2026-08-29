@@ -3,17 +3,35 @@
 set -Eeuo pipefail
 umask 077
 
-MANAGER_VERSION="1.0.0"
+MANAGER_VERSION="1.1.0"
 BACKEND_REPO="sub-store-org/Sub-Store"
 FRONTEND_REPO="sub-store-org/Sub-Store-Front-End"
 BACKEND_ASSET="sub-store.bundle.js"
 FRONTEND_ASSET="dist.zip"
-STATE_ROOT="${SUBSTORE_MANAGER_STATE_DIR:-/etc/substore-manager}"
+INSTANCE_ID="${SUBSTORE_INSTANCE:-default}"
+if [[ "${1:-}" == --instance || "${1:-}" == -i ]]; then
+    [[ -n "${2:-}" ]] || { printf '缺少实例名称\n' >&2; exit 2; }
+    INSTANCE_ID="$2"
+    shift 2
+fi
+if [[ ! "$INSTANCE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ || ${#INSTANCE_ID} -gt 48 ]]; then
+    printf '实例名称必须以字母或数字开头，只能包含字母、数字、点、下划线和连字符，最长 48 个字符\n' >&2
+    exit 2
+fi
+
+STATE_BASE="${SUBSTORE_MANAGER_STATE_DIR:-/etc/substore-manager}"
+if [[ "$INSTANCE_ID" == default ]]; then
+    STATE_ROOT="$STATE_BASE"
+    AUTO_UPDATE_SERVICE_NAME="substore-manager-update.service"
+    AUTO_UPDATE_TIMER_NAME="substore-manager-update.timer"
+else
+    STATE_ROOT="${STATE_BASE}/instances/${INSTANCE_ID}"
+    AUTO_UPDATE_SERVICE_NAME="substore-manager-update-${INSTANCE_ID}.service"
+    AUTO_UPDATE_TIMER_NAME="substore-manager-update-${INSTANCE_ID}.timer"
+fi
 STATE_FILE="${STATE_ROOT}/instance.conf"
 MANAGER_INSTALL_PATH="${SUBSTORE_MANAGER_INSTALL_PATH:-/usr/local/sbin/substore}"
 SYSTEMD_DIR="${SUBSTORE_MANAGER_SYSTEMD_DIR:-/etc/systemd/system}"
-AUTO_UPDATE_SERVICE_NAME="substore-manager-update.service"
-AUTO_UPDATE_TIMER_NAME="substore-manager-update.timer"
 GITHUB_API_BASE="${SUBSTORE_MANAGER_GITHUB_API_BASE:-https://api.github.com}"
 SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
 
@@ -514,7 +532,8 @@ save_state() {
     chmod 700 "$STATE_ROOT"
     temp="${STATE_FILE}.tmp.$$"
     {
-        printf 'STATE_VERSION=1\n'
+        printf 'STATE_VERSION=2\n'
+        printf 'INSTANCE_ID=%s\n' "$(shell_quote "$INSTANCE_ID")"
         printf 'CREATED_BY_MANAGER=%s\n' "$(shell_quote "$CREATED_BY_MANAGER")"
         printf 'DATA_CREATED_BY_MANAGER=%s\n' "$(shell_quote "$DATA_CREATED_BY_MANAGER")"
         printf 'FRONTEND_CREATED_BY_MANAGER=%s\n' "$(shell_quote "$FRONTEND_CREATED_BY_MANAGER")"
@@ -541,6 +560,7 @@ save_state() {
 }
 
 load_state() {
+    local requested_instance="$INSTANCE_ID"
     INSTALL_PRESENT=0
     [[ -f "$STATE_FILE" ]] || return 1
     if [[ "${SUBSTORE_MANAGER_SKIP_STATE_SECURITY:-0}" != 1 ]]; then
@@ -552,6 +572,7 @@ load_state() {
     fi
     # shellcheck source=/dev/null
     source "$STATE_FILE"
+    [[ "$INSTANCE_ID" == "$requested_instance" ]] || die "状态文件实例名称不匹配：$STATE_FILE"
     DATA_CREATED_BY_MANAGER="${DATA_CREATED_BY_MANAGER:-0}"
     FRONTEND_CREATED_BY_MANAGER="${FRONTEND_CREATED_BY_MANAGER:-0}"
     AUTO_UPDATE_ENABLED="${AUTO_UPDATE_ENABLED:-0}"
@@ -692,7 +713,7 @@ validate_auto_update_interval() {
 }
 
 write_auto_update_units() {
-    local service_file timer_file
+    local service_file timer_file update_command
     validate_auto_update_interval "$AUTO_UPDATE_INTERVAL_MINUTES" || \
         die "自动更新间隔必须是 5 到 10080 分钟"
     [[ "$MANAGER_INSTALL_PATH" != *$'\n'* && "$MANAGER_INSTALL_PATH" != *[[:space:]]* ]] || \
@@ -701,11 +722,16 @@ write_auto_update_units() {
     mkdir -p -- "$SYSTEMD_DIR"
     service_file="${SYSTEMD_DIR}/${AUTO_UPDATE_SERVICE_NAME}"
     timer_file="${SYSTEMD_DIR}/${AUTO_UPDATE_TIMER_NAME}"
+    if [[ "$INSTANCE_ID" == default ]]; then
+        update_command="${MANAGER_INSTALL_PATH} update"
+    else
+        update_command="${MANAGER_INSTALL_PATH} --instance ${INSTANCE_ID} update"
+    fi
 
     {
         printf '%s\n' \
             '[Unit]' \
-            'Description=Check and update Sub-Store backend and frontend' \
+            "Description=Check and update Sub-Store instance ${INSTANCE_ID}" \
             'Wants=network-online.target' \
             'After=network-online.target' \
             '' \
@@ -714,7 +740,7 @@ write_auto_update_units() {
             'Environment="HOME=/root"' \
             'Environment="PM2_HOME=/root/.pm2"' \
             'Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
-            "ExecStart=${MANAGER_INSTALL_PATH} update" \
+            "ExecStart=${update_command}" \
             'Nice=10' \
             'TimeoutStartSec=30min'
     } >"$service_file"
@@ -722,7 +748,7 @@ write_auto_update_units() {
     {
         printf '%s\n' \
             '[Unit]' \
-            'Description=Periodic Sub-Store update check' \
+            "Description=Periodic Sub-Store update check for ${INSTANCE_ID}" \
             '' \
             '[Timer]' \
             'OnBootSec=10min' \
@@ -1172,15 +1198,21 @@ install_manager_command() {
 }
 
 new_install() {
-    local default_deploy default_data default_frontend default_magic_path magic_path stage backend_stage frontend_zip frontend_stage
+    local default_deploy default_pm2 default_data default_frontend default_magic_path magic_path stage backend_stage frontend_zip frontend_stage
     prepare_runtime
 
-    default_deploy="${SUBSTORE_INSTALL_DIR:-/opt/sub-store}"
+    if [[ "$INSTANCE_ID" == default ]]; then
+        default_deploy="${SUBSTORE_INSTALL_DIR:-/opt/sub-store}"
+        default_pm2="${SUBSTORE_PM2_NAME:-sub-store}"
+    else
+        default_deploy="${SUBSTORE_INSTALL_DIR:-/opt/sub-store-${INSTANCE_ID}}"
+        default_pm2="${SUBSTORE_PM2_NAME:-sub-store-${INSTANCE_ID}}"
+    fi
     default_magic_path="/$(random_hex 32)"
     if [[ "${SUBSTORE_NON_INTERACTIVE:-0}" == 1 ]]; then
         DEPLOY_DIR="$default_deploy"
         PORT="${SUBSTORE_PORT:-3000}"
-        PM2_NAME="${SUBSTORE_PM2_NAME:-sub-store}"
+        PM2_NAME="$default_pm2"
         HOST="${SUBSTORE_HOST:-127.0.0.1}"
         DATA_DIR="${SUBSTORE_DATA_DIR:-${DEPLOY_DIR}/data}"
         FRONTEND_DIR="${SUBSTORE_FRONTEND_DIR:-${DEPLOY_DIR}/frontend}"
@@ -1188,7 +1220,7 @@ new_install() {
     else
         DEPLOY_DIR="$(prompt '部署目录' "$default_deploy")"
         PORT="$(prompt '监听端口' "${SUBSTORE_PORT:-3000}")"
-        PM2_NAME="$(prompt 'PM2 进程名称' "${SUBSTORE_PM2_NAME:-sub-store}")"
+        PM2_NAME="$(prompt 'PM2 进程名称' "$default_pm2")"
         HOST="$(prompt '监听地址（127.0.0.1 仅本机；:: 监听全部）' "${SUBSTORE_HOST:-127.0.0.1}")"
         default_data="${DEPLOY_DIR}/data"
         DATA_DIR="$(prompt '持久化数据目录' "${SUBSTORE_DATA_DIR:-$default_data}")"
@@ -1280,6 +1312,7 @@ new_install() {
     configure_auto_update_after_install
 
     log_info "Sub-Store 安装完成"
+    printf '管理实例：%s\n' "$INSTANCE_ID"
     printf '部署目录：%s\n' "$DEPLOY_DIR"
     printf '数据目录：%s\n' "$DATA_DIR"
     printf 'PM2 名称：%s\n' "$PM2_NAME"
@@ -1288,9 +1321,31 @@ new_install() {
     printf '本机健康检查：http://%s:%s%s\n' "$(health_host)" "$PORT" "$(health_path)"
 }
 
+pm2_name_managed_elsewhere() {
+    local candidate="$1" state_path
+    local -a state_files=()
+    [[ -f "${STATE_BASE}/instance.conf" ]] && state_files+=("${STATE_BASE}/instance.conf")
+    shopt -s nullglob
+    state_files+=("${STATE_BASE}"/instances/*/instance.conf)
+    shopt -u nullglob
+    for state_path in "${state_files[@]}"; do
+        [[ "$state_path" == "$STATE_FILE" ]] && continue
+        if (
+            local PM2_NAME=""
+            # shellcheck source=/dev/null
+            source "$state_path"
+            [[ "$PM2_NAME" == "$candidate" ]]
+        ); then
+            return 0
+        fi
+    done
+    return 1
+}
+
 discover_pm2_instances() {
+    local raw line name
     # shellcheck disable=SC2016
-    pm2 jlist 2>/dev/null | "$(node_command)" -e '
+    raw="$(pm2 jlist 2>/dev/null | "$(node_command)" -e '
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => input += chunk);
@@ -1310,7 +1365,12 @@ process.stdin.on("end", () => {
     ].join("\t") + "\n");
   }
 });
-'
+')"
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        name="${line%%$'\t'*}"
+        pm2_name_managed_elsewhere "$name" || printf '%s\n' "$line"
+    done <<<"$raw"
 }
 
 import_existing() {
@@ -1824,6 +1884,7 @@ show_config() {
     load_state || die "尚未安装或导入 Sub-Store"
     magic_path="$(env_get "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH 2>/dev/null || true)"
     printf '管理器版本：%s\n' "$MANAGER_VERSION"
+    printf '管理实例：%s\n' "$INSTANCE_ID"
     printf '安装来源：%s\n' "$([[ "$CREATED_BY_MANAGER" == 1 ]] && printf '管理器新建' || printf '导入现有部署')"
     printf '数据目录来源：%s\n' "$([[ "$DATA_CREATED_BY_MANAGER" == 1 ]] && printf '管理器创建' || printf '预先存在或导入')"
     printf '前端目录来源：%s\n' "$([[ "$FRONTEND_CREATED_BY_MANAGER" == 1 ]] && printf '管理器创建' || printf '自定义、预先存在或导入')"
@@ -1838,6 +1899,35 @@ show_config() {
     printf '后端路径：%s\n' "$([[ -n "$magic_path" ]] && mask_value "$magic_path" || printf '<未设置>')"
     printf '后端版本：%s\n' "$(backend_version_from_file "$BACKEND_FILE" || printf 'unknown')"
     printf '前端版本：%s\n' "$FRONTEND_VERSION"
+}
+
+print_instance_summary() {
+    local instance_name="$1" state_path="$2"
+    bash -c '
+set -u
+source "$1"
+version="$(sed -n "1s|^// SUB_STORE_BACKEND_VERSION: ||p" "${BACKEND_FILE:-}" 2>/dev/null | tr -d "\\r\\n")"
+printf "%-20s %-24s %-8s %-28s %s\\n" \
+  "$2" "${PM2_NAME:-unknown}" "${PORT:-?}" \
+  "${DEPLOY_DIR:-unknown}" "${version:-unknown}"
+' _ "$state_path" "$instance_name"
+}
+
+list_instances() {
+    local state_path instance_name
+    local -a state_files=()
+    require_root
+    printf '%-20s %-24s %-8s %-28s %s\n' 实例 PM2名称 端口 部署目录 后端版本
+    if [[ -f "${STATE_BASE}/instance.conf" ]]; then
+        print_instance_summary default "${STATE_BASE}/instance.conf"
+    fi
+    shopt -s nullglob
+    state_files=("${STATE_BASE}"/instances/*/instance.conf)
+    shopt -u nullglob
+    for state_path in "${state_files[@]}"; do
+        instance_name="$(basename -- "$(dirname -- "$state_path")")"
+        print_instance_summary "$instance_name" "$state_path"
+    done
 }
 
 show_version() {
@@ -1903,6 +1993,10 @@ uninstall_instance() {
     release_update_lock
     rm -f -- "$STATE_FILE" "${STATE_ROOT}/update.lock"
     rmdir -- "$STATE_ROOT" 2>/dev/null || true
+    if [[ "$INSTANCE_ID" != default ]]; then
+        rmdir -- "${STATE_BASE}/instances" 2>/dev/null || true
+        rmdir -- "$STATE_BASE" 2>/dev/null || true
+    fi
     log_info "卸载完成；系统 Node.js、全局 PM2 和其他 PM2 进程未被删除"
 }
 
@@ -1911,10 +2005,10 @@ manager_menu() {
         load_state >/dev/null 2>&1 || true
         printf '\n%s========== Sub-Store Manager ==========%s\n\n' "$C_BOLD" "$C_RESET"
         if (( INSTALL_PRESENT )); then
-            printf '当前实例：%s | %s:%s | 后端 %s\n\n' \
-                "$PM2_NAME" "$HOST" "$PORT" "$(backend_version_from_file "$BACKEND_FILE" || printf 'unknown')"
+            printf '管理实例：%s | PM2：%s | %s:%s | 后端 %s\n\n' \
+                "$INSTANCE_ID" "$PM2_NAME" "$HOST" "$PORT" "$(backend_version_from_file "$BACKEND_FILE" || printf 'unknown')"
         else
-            printf '当前状态：未纳入管理\n\n'
+            printf '管理实例：%s | 当前状态：未安装或未导入\n\n' "$INSTANCE_ID"
         fi
         cat <<'EOF'
 1. 安装 Sub-Store
@@ -1930,6 +2024,7 @@ manager_menu() {
 11. 查看当前版本
 12. 卸载 Sub-Store
 13. 自动更新设置
+14. 查看全部管理实例
 0. 退出
 EOF
         case "$(prompt '请选择')" in
@@ -1946,6 +2041,7 @@ EOF
             11) show_version; pause ;;
             12) uninstall_instance; pause ;;
             13) auto_update_menu ;;
+            14) list_instances; pause ;;
             0) return ;;
             *) log_warn "无效选项" ;;
         esac
@@ -1957,7 +2053,9 @@ usage() {
 Sub-Store Node.js + PM2 Manager ${MANAGER_VERSION}
 
 Usage:
-  substore.sh                 交互式管理菜单
+  substore.sh [--instance 名称] [命令]
+  substore.sh                 default 实例的交互式管理菜单
+  substore.sh --instance foo  foo 实例的交互式管理菜单
   substore.sh install         安装或导入现有实例
   substore.sh update          更新后端与前端
   substore.sh start|stop|restart
@@ -1966,6 +2064,7 @@ Usage:
   substore.sh env             Env 管理菜单
   substore.sh config|version
   substore.sh auto            自动更新设置
+  substore.sh instances       查看全部管理实例
   substore.sh uninstall
 EOF
 }
@@ -1986,6 +2085,7 @@ main() {
         config) show_config ;;
         version) show_version ;;
         auto) require_root; auto_update_menu ;;
+        instances) list_instances ;;
         uninstall) uninstall_instance ;;
         --help|-h|help) usage ;;
         *) usage >&2; exit 2 ;;

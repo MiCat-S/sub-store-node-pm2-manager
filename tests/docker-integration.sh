@@ -48,6 +48,20 @@ grep -Fq 'SUB_STORE_BACKEND_API_PORT="39031"' /opt/substore-test/.env
 grep -Fq 'SUB_STORE_FRONTEND_BACKEND_PATH="/integration-path"' /opt/substore-test/.env
 grep -Fq 'SUB_STORE_FRONTEND_PATH="/srv/substore-frontend"' /opt/substore-test/.env
 
+env \
+    SUBSTORE_INSTALL_DIR=/opt/substore-second \
+    SUBSTORE_DATA_DIR=/var/lib/substore-second \
+    SUBSTORE_FRONTEND_DIR=/srv/substore-second-frontend \
+    SUBSTORE_PORT=39033 \
+    SUBSTORE_PM2_NAME=sub-store-second \
+    SUBSTORE_HOST=127.0.0.1 \
+    SUBSTORE_MAGIC_PATH=/second-path \
+    /usr/local/sbin/substore-test --instance second install
+test -f /etc/substore-manager-test/instances/second/instance.conf
+test -f /srv/substore-second-frontend/index.html
+printf 'second-sentinel\n' >/var/lib/substore-second/sentinel.txt
+/usr/local/sbin/substore-test instances | grep -q second
+
 printf 'persistent-sentinel\n' >/var/lib/substore-test/sentinel.txt
 /usr/local/sbin/substore-test port 39032
 grep -Fq 'SUB_STORE_BACKEND_API_PORT="39032"' /opt/substore-test/.env
@@ -58,6 +72,7 @@ sed -i 's/^FRONTEND_VERSION=.*/FRONTEND_VERSION=0.0.0/' \
 chmod 600 /etc/substore-manager-test/instance.conf
 /usr/local/sbin/substore-test update
 test "$(cat /var/lib/substore-test/sentinel.txt)" = persistent-sentinel
+test "$(cat /var/lib/substore-second/sentinel.txt)" = second-sentinel
 test -n "$(find /opt/substore-test/backups -mindepth 1 -maxdepth 1 -type d -print -quit)"
 
 env_before="$(sha256sum /opt/substore-test/.env | awk '{print $1}')"
@@ -82,6 +97,25 @@ process.stdin.on("data", chunk => input += chunk).on("end", () => {
   if (!app || app.pm2_env.status !== "online" || app.pm2_env.watch === true) process.exit(1);
 });
 '
+
+pm2 jlist | node -e '
+let input = "";
+process.stdin.on("data", chunk => input += chunk).on("end", () => {
+  const apps = JSON.parse(input);
+  for (const name of ["sub-store-integration", "sub-store-second"]) {
+    const app = apps.find(item => item.name === name);
+    if (!app || app.pm2_env.status !== "online") process.exit(1);
+  }
+});
+'
+
+printf 'y\nn\n' | /usr/local/sbin/substore-test --instance second uninstall
+test -f /var/lib/substore-second/sentinel.txt
+test ! -e /srv/substore-second-frontend
+if pm2 jlist | grep -q sub-store-second; then
+    printf 'Second PM2 process still exists after uninstall\n' >&2
+    exit 1
+fi
 
 printf 'y\nn\n' | /usr/local/sbin/substore-test uninstall
 test -f /var/lib/substore-test/sentinel.txt

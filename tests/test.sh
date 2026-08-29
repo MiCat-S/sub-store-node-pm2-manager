@@ -96,6 +96,7 @@ PM2_NAME=""
 INSTALL_PRESENT=0
 load_state || fail "load state"
 [[ "$DEPLOY_DIR" == "$TEST_ROOT/deploy" ]] || fail "state deploy dir"
+[[ "$INSTANCE_ID" == default ]] || fail "default instance id"
 [[ "$PM2_NAME" == sub-store-test ]] || fail "state PM2 name"
 [[ "$DATA_CREATED_BY_MANAGER" == 1 ]] || fail "state data ownership"
 [[ "$FRONTEND_CREATED_BY_MANAGER" == 1 ]] || fail "state frontend ownership"
@@ -109,5 +110,25 @@ grep -Fq 'ExecStart=/usr/local/sbin/substore update' "$TEST_ROOT/systemd/substor
 grep -Fq 'OnUnitActiveSec=90min' "$TEST_ROOT/systemd/substore-manager-update.timer" || fail "auto-update interval"
 validate_auto_update_interval 5 || fail "minimum auto-update interval"
 if validate_auto_update_interval 4; then fail "invalid auto-update interval"; fi
+if SUBSTORE_INSTANCE=.. SUBSTORE_MANAGER_LIBRARY_ONLY=1 bash "$SCRIPT" >/dev/null 2>&1; then
+    fail "unsafe instance name accepted"
+fi
+
+SUBSTORE_MANAGER_LIBRARY_ONLY=1 \
+SUBSTORE_INSTANCE=blue \
+SUBSTORE_MANAGER_STATE_DIR="$TEST_ROOT/multi-state" \
+SUBSTORE_MANAGER_SYSTEMD_DIR="$TEST_ROOT/multi-systemd" \
+bash -c '
+set -Eeuo pipefail
+source "$1"
+AUTO_UPDATE_INTERVAL_MINUTES=45
+MANAGER_INSTALL_PATH=/usr/local/sbin/substore
+write_auto_update_units
+test "$STATE_ROOT" = "'"$TEST_ROOT"'/multi-state/instances/blue"
+grep -Fq "ExecStart=/usr/local/sbin/substore --instance blue update" \
+  "'"$TEST_ROOT"'/multi-systemd/substore-manager-update-blue.service"
+grep -Fq "OnUnitActiveSec=45min" \
+  "'"$TEST_ROOT"'/multi-systemd/substore-manager-update-blue.timer"
+' _ "$SCRIPT" || fail "named instance timer isolation"
 
 printf 'PASS: env parser, validation, state persistence, PM2 config and update timer\n'
