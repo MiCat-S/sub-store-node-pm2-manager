@@ -15,6 +15,8 @@
 
 项目地址：[Autlin/sub-store-node-pm2-manager](https://github.com/Autlin/sub-store-node-pm2-manager)
 
+📚 完整分步教程：[项目 Wiki](https://github.com/Autlin/sub-store-node-pm2-manager/wiki)
+
 > 💡 **第一次使用？** 准备一台 Debian/Ubuntu 服务器，复制下面的一行安装命令，然后按照中文提示操作即可。不确定的选项直接按 Enter 使用默认值。
 
 ## ✅ 开始前需要什么
