@@ -950,7 +950,7 @@ new_install() {
     prepare_runtime
 
     default_deploy="${SUBSTORE_INSTALL_DIR:-/opt/sub-store}"
-    default_magic_path="/$(random_hex 16)"
+    default_magic_path="/$(random_hex 32)"
     if [[ "${SUBSTORE_NON_INTERACTIVE:-0}" == 1 ]]; then
         DEPLOY_DIR="$default_deploy"
         PORT="${SUBSTORE_PORT:-3000}"
@@ -962,7 +962,7 @@ new_install() {
         DEPLOY_DIR="$(prompt '部署目录' "$default_deploy")"
         PORT="$(prompt '监听端口' "${SUBSTORE_PORT:-3000}")"
         PM2_NAME="$(prompt 'PM2 进程名称' "${SUBSTORE_PM2_NAME:-sub-store}")"
-        HOST="$(prompt '监听地址' "${SUBSTORE_HOST:-127.0.0.1}")"
+        HOST="$(prompt '监听地址（127.0.0.1 仅本机；:: 监听全部）' "${SUBSTORE_HOST:-127.0.0.1}")"
         default_data="${DEPLOY_DIR}/data"
         DATA_DIR="$(prompt '持久化数据目录' "${SUBSTORE_DATA_DIR:-$default_data}")"
         magic_path="$(prompt '后端路径前缀（SUB_STORE_FRONTEND_BACKEND_PATH）' "$default_magic_path")"

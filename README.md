@@ -12,6 +12,8 @@
 
 当前审计基线日期为 2026-08-29：后端 `2.36.40`、前端 `2.29.10`、Node `24.15.0`。脚本运行时会查询最新 Release，不固定下载这些旧值。
 
+同时参考 Xream 的 [Sub-Store 自建教程](https://xream.notion.site/Sub-Store-Docker-8efc1aea40fa431b9a562b78994e7fb8) 中“自己部署前后端”章节。该章节给出的 Node 运行结构是：官方前端 `dist.zip`、官方后端 `sub-store.bundle.js`、`SUB_STORE_BACKEND_MERGE=true`、单个路径前缀、独立前端目录和数据目录。本管理器在此基础上增加 PM2、持久化状态、更新校验和回滚，不改变 Sub-Store 的运行入口。
+
 ## 为什么不执行 pnpm install
 
 官方 GitHub Actions 使用 esbuild 将 Node 运行依赖打入 `sub-store.bundle.js` 并作为 Release 资产发布。因此部署 Release bundle 只需要 Node.js，不需要在服务器克隆源码或安装后端 `node_modules`。前端 `dist.zip` 已经是构建完成的静态文件。
@@ -30,7 +32,7 @@ sudo ./substore.sh
 - 部署目录，默认 `/opt/sub-store`
 - 监听端口，默认 `3000`
 - PM2 进程名，默认 `sub-store`
-- 监听地址，默认 `127.0.0.1`
+- 监听地址，默认 `127.0.0.1`（仅本机）；输入 `::` 可监听全部地址
 - 数据目录，默认 `<部署目录>/data`
 - 后端路径前缀 `SUB_STORE_FRONTEND_BACKEND_PATH`，默认自动生成随机值，也可自定义
 
@@ -124,7 +126,7 @@ http://127.0.0.1:端口/随机路径/api/utils/env
 
 `SUB_STORE_FRONTEND_BACKEND_PATH` 是路径前缀，不是登录密码。公网部署仍应配合 HTTPS、访问控制或 VPN。
 
-交互安装会显示一个随机默认路径，可以直接回车接受，也可以修改成自己的路径。官方实现只支持一个 `SUB_STORE_FRONTEND_BACKEND_PATH` 字符串，不支持用逗号等方式同时配置多个入口；以后可在 Env 管理中更换。
+交互安装会显示一个 64 位十六进制随机默认路径，可以直接回车接受，也可以修改成自己的路径。官方实现只支持一个 `SUB_STORE_FRONTEND_BACKEND_PATH` 字符串，不支持用逗号等方式同时配置多个入口；以后可在 Env 管理中更换。
 
 ## 自定义端口
 
