@@ -191,6 +191,8 @@ sudo substore env
 
 官方 Env 会显示名称、用途和源码默认值。端口、路径、布尔开关、CORS、代理、URL 和 cron 会进行基本格式检查。路径前缀、推送服务、远程数据 URL/处理表达式等按敏感值脱敏显示。Env 重启验证失败时会恢复修改前的 `.env`；数据目录必须保持绝对路径，管理器不会把它重置为源码默认的当前工作目录 `.`。
 
+导入既有 PM2 实例时，如果合并模式所需的 `SUB_STORE_FRONTEND_BACKEND_PATH` 只存在于 PM2 当前进程环境而没有写入 `.env`，管理器会在修改前端目录时自动读取并持久化；PM2 中也找不到时才提示手工输入。
+
 Env 独立保存为 `<部署目录>/.env`，权限为 `600`。更新只替换后端 bundle 和前端静态文件，不覆盖 Env。PM2 的工作目录固定为部署目录，因此 restart、PM2 resurrect 和系统重启都会重新加载它。
 
 完整示例见 [`.env.example`](.env.example)。以下变量属于 Docker 的 HTTP-META，而不是 Node 后端，因此没有加入 Node 配置：

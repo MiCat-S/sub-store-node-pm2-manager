@@ -818,6 +818,22 @@ process.stdin.on("end", () => {
 ' "$PM2_NAME"
 }
 
+pm2_env_get() {
+    local key="$1"
+    pm2 jlist 2>/dev/null | "$(node_command)" -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => {
+  const [name, key] = process.argv.slice(1);
+  const app = JSON.parse(input).find(item => item.name === name);
+  const value = app?.pm2_env?.[key];
+  if (value == null || value === "") process.exit(1);
+  process.stdout.write(String(value));
+});
+' "$PM2_NAME" "$key"
+}
+
 start_instance() {
     if pm2_process_exists; then
         pm2 start "$PM2_NAME" >/dev/null
@@ -1379,6 +1395,32 @@ validate_env_consistency() {
     fi
 }
 
+ensure_backend_path_for_merge() {
+    local merge backend_prefix magic live_path entered_path
+    merge="$(env_get "$ENV_FILE" SUB_STORE_BACKEND_MERGE 2>/dev/null || true)"
+    backend_prefix="$(env_get "$ENV_FILE" SUB_STORE_BACKEND_PREFIX 2>/dev/null || true)"
+    [[ -n "$merge" || -n "$backend_prefix" ]] || return 0
+
+    magic="$(env_get "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH 2>/dev/null || true)"
+    if validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH "$magic"; then
+        return 0
+    fi
+
+    live_path="$(pm2_env_get SUB_STORE_FRONTEND_BACKEND_PATH 2>/dev/null || true)"
+    if validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH "$live_path"; then
+        env_set "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH "$live_path"
+        log_info "已从 PM2 当前进程环境补全 SUB_STORE_FRONTEND_BACKEND_PATH"
+        return 0
+    fi
+
+    read -r -p "当前 .env 缺少后端路径前缀，请输入正在使用的 SUB_STORE_FRONTEND_BACKEND_PATH（必须以 / 开头）: " entered_path
+    if ! validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH "$entered_path"; then
+        log_error "后端路径前缀必须以 / 开头"
+        return 1
+    fi
+    env_set "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH "$entered_path"
+}
+
 select_official_env() {
     local index key
     for index in "${!OFFICIAL_ENV_ORDER[@]}"; do
@@ -1430,6 +1472,11 @@ modify_official_env() {
     fi
 
     begin_env_transaction
+
+    if [[ "$key" == SUB_STORE_FRONTEND_PATH ]] && ! ensure_backend_path_for_merge; then
+        cp -a "$ENV_TRANSACTION_BACKUP" "$ENV_FILE"
+        return
+    fi
 
     if [[ "$key" == SUB_STORE_DATA_BASE_PATH && "$value" != "$DATA_DIR" ]]; then
         old_data="$DATA_DIR"

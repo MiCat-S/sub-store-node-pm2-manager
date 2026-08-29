@@ -50,6 +50,22 @@ env_set "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH /api/sub-store/
 env_set "$ENV_FILE" SUB_STORE_FRONTEND_PATH "$TEST_ROOT/frontend"
 validate_env_consistency || fail "merged frontend with nested prefix"
 
+mkdir -p "$TEST_ROOT/bin"
+cat >"$TEST_ROOT/bin/pm2" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == jlist ]]; then
+    printf '%s\n' '[{"name":"sub-store-live","pm2_env":{"SUB_STORE_FRONTEND_BACKEND_PATH":"/live/path/"}}]'
+    exit 0
+fi
+exit 1
+EOF
+chmod 755 "$TEST_ROOT/bin/pm2"
+PATH="$TEST_ROOT/bin:$PATH"
+PM2_NAME=sub-store-live
+env_delete "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH
+ensure_backend_path_for_merge || fail "recover backend path from PM2"
+[[ "$(env_get "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH)" == /live/path/ ]] || fail "persist recovered PM2 backend path"
+
 DEPLOY_DIR="$TEST_ROOT/deploy"
 BACKEND_FILE="$DEPLOY_DIR/sub-store.bundle.js"
 FRONTEND_DIR="$DEPLOY_DIR/frontend"
