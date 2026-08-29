@@ -57,6 +57,7 @@ FRONTEND_VERSION=4.5.6
 INSTALL_ID=0123456789abcdef
 CREATED_BY_MANAGER=1
 DATA_CREATED_BY_MANAGER=1
+FRONTEND_CREATED_BY_MANAGER=1
 INSTALLED_AT=2026-08-29T00:00:00+00:00
 mkdir -p "$DEPLOY_DIR" "$DATA_DIR"
 printf '%s\n' "$INSTALL_ID" >"$MARKER_FILE"
@@ -70,6 +71,7 @@ load_state || fail "load state"
 [[ "$DEPLOY_DIR" == "$TEST_ROOT/deploy" ]] || fail "state deploy dir"
 [[ "$PM2_NAME" == sub-store-test ]] || fail "state PM2 name"
 [[ "$DATA_CREATED_BY_MANAGER" == 1 ]] || fail "state data ownership"
+[[ "$FRONTEND_CREATED_BY_MANAGER" == 1 ]] || fail "state frontend ownership"
 grep -Fq '"watch": false' "$ECOSYSTEM_FILE" || fail "PM2 watch disabled"
 grep -Fq '"cwd":' "$ECOSYSTEM_FILE" || fail "PM2 cwd missing"
 

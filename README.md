@@ -58,6 +58,7 @@ sudo ./substore.sh
 - PM2 进程名，默认 `sub-store`
 - 监听地址，默认 `127.0.0.1`（仅本机）；输入 `::` 可监听全部地址
 - 数据目录，默认 `<部署目录>/data`
+- 前端目录，默认 `<部署目录>/frontend`，可以指定到其他绝对路径
 - 后端路径前缀 `SUB_STORE_FRONTEND_BACKEND_PATH`，默认自动生成随机值，也可自定义
 
 也可以执行：
@@ -73,6 +74,7 @@ sudo env \
   SUBSTORE_NON_INTERACTIVE=1 \
   SUBSTORE_INSTALL_DIR=/data/sub-store \
   SUBSTORE_DATA_DIR=/data/sub-store-data \
+  SUBSTORE_FRONTEND_DIR=/srv/sub-store-frontend \
   SUBSTORE_PORT=3000 \
   SUBSTORE_PM2_NAME=sub-store \
   SUBSTORE_HOST=127.0.0.1 \
@@ -101,6 +103,8 @@ sudo env \
 ```
 
 当前 Node 源码没有独立的配置目录或缓存目录 Env。核心配置和缓存状态随 `root.json`、`sub-store.json` 保存在 `SUB_STORE_DATA_BASE_PATH`；可选 MMDB 文件位置则由对应的 `SUB_STORE_MMDB_*_PATH` 控制。管理器不会虚构额外的 cache/config 路径。
+
+前端目录由实例状态和官方 `SUB_STORE_FRONTEND_PATH` 共同记录。每次前端 Release 更新都会把新的 `dist.zip` 解压到这个目录；自定义到部署目录之外也不会被改回默认路径。安装前已存在的非空目录不会被覆盖。
 
 管理器实例状态集中保存在：
 

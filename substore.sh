@@ -17,6 +17,7 @@ SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -
 INSTALL_PRESENT=0
 CREATED_BY_MANAGER=""
 DATA_CREATED_BY_MANAGER=""
+FRONTEND_CREATED_BY_MANAGER=""
 INSTALL_ID=""
 DEPLOY_DIR=""
 BACKEND_FILE=""
@@ -164,6 +165,27 @@ safe_remove_managed_path() {
     [[ -f "$marker" ]] || die "缺少管理标记，拒绝删除：$path"
     grep -Fxq "$INSTALL_ID" "$marker" || die "管理标记不匹配，拒绝删除：$path"
     rm -rf -- "$path"
+}
+
+frontend_marker_path() {
+    printf '%s' "${FRONTEND_DIR}/.substore-manager-frontend"
+}
+
+write_frontend_marker() {
+    local marker
+    marker="$(frontend_marker_path)"
+    mkdir -p -- "$FRONTEND_DIR"
+    printf '%s\n' "$INSTALL_ID" >"$marker"
+    chmod 600 "$marker"
+}
+
+assert_frontend_managed() {
+    local marker
+    marker="$(frontend_marker_path)"
+    if [[ ! -f "$marker" ]] || ! grep -Fxq "$INSTALL_ID" "$marker"; then
+        log_error "前端目录缺少匹配的管理标记，拒绝覆盖：$FRONTEND_DIR"
+        return 1
+    fi
 }
 
 init_env_catalog() {
@@ -489,6 +511,7 @@ save_state() {
         printf 'STATE_VERSION=1\n'
         printf 'CREATED_BY_MANAGER=%s\n' "$(shell_quote "$CREATED_BY_MANAGER")"
         printf 'DATA_CREATED_BY_MANAGER=%s\n' "$(shell_quote "$DATA_CREATED_BY_MANAGER")"
+        printf 'FRONTEND_CREATED_BY_MANAGER=%s\n' "$(shell_quote "$FRONTEND_CREATED_BY_MANAGER")"
         printf 'INSTALL_ID=%s\n' "$(shell_quote "$INSTALL_ID")"
         printf 'DEPLOY_DIR=%s\n' "$(shell_quote "$DEPLOY_DIR")"
         printf 'BACKEND_FILE=%s\n' "$(shell_quote "$BACKEND_FILE")"
@@ -522,6 +545,7 @@ load_state() {
     # shellcheck source=/dev/null
     source "$STATE_FILE"
     DATA_CREATED_BY_MANAGER="${DATA_CREATED_BY_MANAGER:-0}"
+    FRONTEND_CREATED_BY_MANAGER="${FRONTEND_CREATED_BY_MANAGER:-0}"
     [[ -n "$INSTALL_ID" && -n "$DEPLOY_DIR" && -n "$PM2_NAME" ]] || die "状态文件不完整：$STATE_FILE"
     [[ -f "$MARKER_FILE" ]] || die "实例标记不存在：$MARKER_FILE"
     grep -Fxq "$INSTALL_ID" "$MARKER_FILE" || die "实例标记与状态文件不匹配"
@@ -946,7 +970,7 @@ install_manager_command() {
 }
 
 new_install() {
-    local default_deploy default_data default_magic_path magic_path stage backend_stage frontend_zip frontend_stage
+    local default_deploy default_data default_frontend default_magic_path magic_path stage backend_stage frontend_zip frontend_stage
     prepare_runtime
 
     default_deploy="${SUBSTORE_INSTALL_DIR:-/opt/sub-store}"
@@ -957,6 +981,7 @@ new_install() {
         PM2_NAME="${SUBSTORE_PM2_NAME:-sub-store}"
         HOST="${SUBSTORE_HOST:-127.0.0.1}"
         DATA_DIR="${SUBSTORE_DATA_DIR:-${DEPLOY_DIR}/data}"
+        FRONTEND_DIR="${SUBSTORE_FRONTEND_DIR:-${DEPLOY_DIR}/frontend}"
         magic_path="${SUBSTORE_MAGIC_PATH:-$default_magic_path}"
     else
         DEPLOY_DIR="$(prompt '部署目录' "$default_deploy")"
@@ -965,11 +990,15 @@ new_install() {
         HOST="$(prompt '监听地址（127.0.0.1 仅本机；:: 监听全部）' "${SUBSTORE_HOST:-127.0.0.1}")"
         default_data="${DEPLOY_DIR}/data"
         DATA_DIR="$(prompt '持久化数据目录' "${SUBSTORE_DATA_DIR:-$default_data}")"
+        default_frontend="${DEPLOY_DIR}/frontend"
+        FRONTEND_DIR="$(prompt '前端文件目录（更新后的 dist 解压位置）' "${SUBSTORE_FRONTEND_DIR:-$default_frontend}")"
         magic_path="$(prompt '后端路径前缀（SUB_STORE_FRONTEND_BACKEND_PATH）' "$default_magic_path")"
     fi
 
     validate_absolute_path "$DEPLOY_DIR" || die "部署目录必须是安全的绝对路径"
     validate_absolute_path "$DATA_DIR" || die "数据目录必须是安全的绝对路径"
+    validate_absolute_path "$FRONTEND_DIR" || die "前端目录必须是安全的绝对路径"
+    [[ "$FRONTEND_DIR" != "$DEPLOY_DIR" ]] || die "前端目录不能与部署目录相同"
     validate_env_value SUB_STORE_BACKEND_API_PORT "$PORT" || die "端口无效：$PORT"
     validate_env_value SUB_STORE_BACKEND_API_HOST "$HOST" || die "监听地址无效：$HOST"
     validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH "$magic_path" || \
@@ -979,6 +1008,9 @@ new_install() {
     if [[ -e "$DEPLOY_DIR" ]] && find "$DEPLOY_DIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
         die "部署目录非空且不属于当前管理实例：$DEPLOY_DIR"
     fi
+    if [[ -e "$FRONTEND_DIR" ]] && find "$FRONTEND_DIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+        die "前端目录必须不存在或为空：$FRONTEND_DIR"
+    fi
     if pm2_process_exists; then
         die "PM2 进程名已存在：$PM2_NAME"
     fi
@@ -987,7 +1019,6 @@ new_install() {
     fi
 
     BACKEND_FILE="${DEPLOY_DIR}/${BACKEND_ASSET}"
-    FRONTEND_DIR="${DEPLOY_DIR}/frontend"
     ENV_FILE="${DEPLOY_DIR}/.env"
     ECOSYSTEM_FILE="${DEPLOY_DIR}/ecosystem.config.cjs"
     MARKER_FILE="${DEPLOY_DIR}/.substore-manager-instance"
@@ -997,6 +1028,11 @@ new_install() {
         DATA_CREATED_BY_MANAGER=0
     else
         DATA_CREATED_BY_MANAGER=1
+    fi
+    if [[ -e "$FRONTEND_DIR" ]]; then
+        FRONTEND_CREATED_BY_MANAGER=0
+    else
+        FRONTEND_CREATED_BY_MANAGER=1
     fi
     INSTALLED_AT="$(date -Iseconds)"
     NODE_BIN="$(command -v node)"
@@ -1022,6 +1058,7 @@ new_install() {
     install -m 0644 "$backend_stage" "$BACKEND_FILE"
     mkdir -p "$FRONTEND_DIR"
     cp -a "$frontend_stage"/. "$FRONTEND_DIR"/
+    write_frontend_marker
     write_initial_env "$magic_path"
     write_ecosystem
 
@@ -1109,6 +1146,7 @@ import_existing() {
     INSTALL_ID="$(random_hex 16)"
     CREATED_BY_MANAGER=0
     DATA_CREATED_BY_MANAGER=0
+    FRONTEND_CREATED_BY_MANAGER=0
     INSTALLED_AT="$(date -Iseconds)"
     BACKEND_VERSION="$(backend_version_from_file "$BACKEND_FILE" || printf 'unknown')"
     FRONTEND_VERSION="unknown"
@@ -1124,6 +1162,7 @@ import_existing() {
     mkdir -p -- "$DATA_DIR" "${DEPLOY_DIR}/backups"
     printf '%s\n' "$INSTALL_ID" >"${DATA_DIR}/.substore-manager-data"
     chmod 600 "${DATA_DIR}/.substore-manager-data"
+    write_frontend_marker
     write_ecosystem
     save_state
     install_manager_command
@@ -1174,9 +1213,13 @@ restore_backup() {
     stop_instance || true
     install -m 0644 "$backup_dir/files/$BACKEND_ASSET" "$BACKEND_FILE" || return 1
     if [[ -d "$backup_dir/files/frontend" ]]; then
+        if [[ -e "$FRONTEND_DIR" ]] && ! assert_frontend_managed; then
+            return 1
+        fi
         rm -rf -- "$FRONTEND_DIR" || return 1
         mkdir -p -- "$FRONTEND_DIR" || return 1
         cp -a "$backup_dir/files/frontend"/. "$FRONTEND_DIR"/ || return 1
+        write_frontend_marker || return 1
     fi
     cp -a "$backup_dir/files/.env" "$ENV_FILE" || return 1
     cp -a "$backup_dir/files/ecosystem.config.cjs" "$ECOSYSTEM_FILE" || return 1
@@ -1200,9 +1243,13 @@ apply_staged_update() {
         install -m 0644 "$backend_stage" "$BACKEND_FILE" || return 1
     fi
     if (( need_frontend )); then
+        if [[ -e "$FRONTEND_DIR" ]] && ! assert_frontend_managed; then
+            return 1
+        fi
         rm -rf -- "$FRONTEND_DIR" || return 1
         mkdir -p -- "$FRONTEND_DIR" || return 1
         cp -a "$frontend_stage"/. "$FRONTEND_DIR"/ || return 1
+        write_frontend_marker || return 1
     fi
 }
 
@@ -1399,9 +1446,14 @@ modify_official_env() {
         printf '%s\n' "$INSTALL_ID" >"${value}/.substore-manager-data"
         chmod 600 "${value}/.substore-manager-data"
     fi
-    if [[ "$key" == SUB_STORE_FRONTEND_PATH && ! -f "$value/index.html" ]]; then
-        log_error "该目录没有 index.html：$value"
-        return
+    if [[ "$key" == SUB_STORE_FRONTEND_PATH ]]; then
+        if [[ ! -f "$value/index.html" ]]; then
+            log_error "该目录没有 index.html：$value"
+            return
+        fi
+        FRONTEND_DIR="$value"
+        FRONTEND_CREATED_BY_MANAGER=0
+        write_frontend_marker
     fi
     env_set "$ENV_FILE" "$key" "$value"
     if ! validate_env_consistency; then
@@ -1536,6 +1588,7 @@ show_config() {
     printf '管理器版本：%s\n' "$MANAGER_VERSION"
     printf '安装来源：%s\n' "$([[ "$CREATED_BY_MANAGER" == 1 ]] && printf '管理器新建' || printf '导入现有部署')"
     printf '数据目录来源：%s\n' "$([[ "$DATA_CREATED_BY_MANAGER" == 1 ]] && printf '管理器创建' || printf '预先存在或导入')"
+    printf '前端目录来源：%s\n' "$([[ "$FRONTEND_CREATED_BY_MANAGER" == 1 ]] && printf '管理器创建' || printf '自定义、预先存在或导入')"
     printf '部署目录：%s\n' "$DEPLOY_DIR"
     printf '后端文件：%s\n' "$BACKEND_FILE"
     printf '前端目录：%s\n' "$FRONTEND_DIR"
@@ -1595,10 +1648,16 @@ uninstall_instance() {
 
     if [[ "$CREATED_BY_MANAGER" == 1 ]]; then
         rm -f -- "$BACKEND_FILE" "$ENV_FILE" "$ECOSYSTEM_FILE" "$MARKER_FILE"
-        rm -rf -- "$FRONTEND_DIR" "${DEPLOY_DIR}/backups"
+        if [[ "$FRONTEND_CREATED_BY_MANAGER" == 1 ]]; then
+            safe_remove_managed_path "$FRONTEND_DIR" "$(frontend_marker_path)"
+        else
+            rm -f -- "$(frontend_marker_path)"
+            log_info "自定义或预先存在的前端目录已保留：$FRONTEND_DIR"
+        fi
+        rm -rf -- "${DEPLOY_DIR}/backups"
         rmdir -- "$DEPLOY_DIR" 2>/dev/null || true
     else
-        rm -f -- "$ECOSYSTEM_FILE" "$MARKER_FILE"
+        rm -f -- "$ECOSYSTEM_FILE" "$MARKER_FILE" "$(frontend_marker_path)"
         log_info "导入实例的程序、Env、前端和数据均已保留"
     fi
     rm -f -- "$STATE_FILE"

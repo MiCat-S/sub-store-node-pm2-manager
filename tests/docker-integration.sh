@@ -32,6 +32,7 @@ export SUBSTORE_MANAGER_SKIP_PM2_STARTUP=1
 export SUBSTORE_NON_INTERACTIVE=1
 export SUBSTORE_INSTALL_DIR=/opt/substore-test
 export SUBSTORE_DATA_DIR=/var/lib/substore-test
+export SUBSTORE_FRONTEND_DIR=/srv/substore-frontend
 export SUBSTORE_PORT=39031
 export SUBSTORE_PM2_NAME=sub-store-integration
 export SUBSTORE_HOST=127.0.0.1
@@ -39,10 +40,12 @@ export SUBSTORE_MAGIC_PATH=/integration-path
 
 bash /src/substore.sh install
 test -f /opt/substore-test/sub-store.bundle.js
-test -f /opt/substore-test/frontend/index.html
+test -f /srv/substore-frontend/index.html
+test ! -e /opt/substore-test/frontend
 test -f /var/lib/substore-test/root.json
 grep -Fq 'SUB_STORE_BACKEND_API_PORT="39031"' /opt/substore-test/.env
 grep -Fq 'SUB_STORE_FRONTEND_BACKEND_PATH="/integration-path"' /opt/substore-test/.env
+grep -Fq 'SUB_STORE_FRONTEND_PATH="/srv/substore-frontend"' /opt/substore-test/.env
 
 printf 'persistent-sentinel\n' >/var/lib/substore-test/sentinel.txt
 /usr/local/sbin/substore-test port 39032
@@ -57,7 +60,7 @@ test "$(cat /var/lib/substore-test/sentinel.txt)" = persistent-sentinel
 test -n "$(find /opt/substore-test/backups -mindepth 1 -maxdepth 1 -type d -print -quit)"
 
 env_before="$(sha256sum /opt/substore-test/.env | awk '{print $1}')"
-frontend_before="$(sha256sum /opt/substore-test/frontend/index.html | awk '{print $1}')"
+frontend_before="$(sha256sum /srv/substore-frontend/index.html | awk '{print $1}')"
 sed -i 's/^FRONTEND_VERSION=.*/FRONTEND_VERSION=0.0.0/' \
     /etc/substore-manager-test/instance.conf
 chmod 600 /etc/substore-manager-test/instance.conf
@@ -69,7 +72,7 @@ if /usr/local/sbin/substore-test update; then
 fi
 test "$(cat /var/lib/substore-test/sentinel.txt)" = persistent-sentinel
 test "$(sha256sum /opt/substore-test/.env | awk '{print $1}')" = "$env_before"
-test "$(sha256sum /opt/substore-test/frontend/index.html | awk '{print $1}')" = "$frontend_before"
+test "$(sha256sum /srv/substore-frontend/index.html | awk '{print $1}')" = "$frontend_before"
 
 pm2 jlist | node -e '
 let input = "";
@@ -81,6 +84,7 @@ process.stdin.on("data", chunk => input += chunk).on("end", () => {
 
 printf 'y\nn\n' | /usr/local/sbin/substore-test uninstall
 test -f /var/lib/substore-test/sentinel.txt
+test ! -e /srv/substore-frontend
 command -v node >/dev/null
 command -v pm2 >/dev/null
 if pm2 jlist | grep -q sub-store-integration; then
