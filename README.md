@@ -84,9 +84,9 @@ sudo env \
 
 ## Node.js 与 PM2
 
-脚本读取官方 `.node-version`。缺少合适 Node.js 时，会下载并执行 NodeSource 官方 `setup_<主版本>.x` 一键配置脚本，再通过 APT 安装 `nodejs`；支持 `amd64` 和 `arm64`。NodeSource 脚本会先保存到临时文件并通过 `bash -n` 检查，不直接使用不可检查的管道执行。
+脚本读取官方 `.node-version`，只取其中的主版本来选择 NodeSource 安装通道，例如 `.node-version` 为 `24.15.0` 时使用 `setup_24.x`。它不会把补丁版本 `24.15.0` 固定成安装目标；APT 最终安装 NodeSource 仓库当前提供的 Node 24 版本。
 
-已有同主版本且不低于官方构建基线的 Node.js 会被复用。脚本不会自动降级更高主版本，以免影响服务器上的其他项目；确认兼容时可显式设置 `SUBSTORE_ALLOW_NEWER_NODE=1`。
+缺少 Node.js，或者现有 Node 主版本与该通道不一致时，会下载并执行 NodeSource 官方 `setup_<主版本>.x` 一键配置脚本，再通过 APT 安装 `nodejs`；支持 `amd64` 和 `arm64`。NodeSource 脚本会先保存到临时文件并通过 `bash -n` 检查，不直接使用不可检查的管道执行。安装完成只验证 `node` 和 `npm` 可用，以 NodeSource/APT 实际安装结果为准。同主版本的现有 Node.js 会直接复用。
 
 PM2 不存在时使用 npm 全局安装。PM2 配置固定：
 

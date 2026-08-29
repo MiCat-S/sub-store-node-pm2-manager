@@ -601,42 +601,32 @@ official_node_version() {
 }
 
 ensure_node() {
-    local required_version required_major installed_version installed_major setup_script
-    required_version="$(official_node_version)"
-    required_major="${required_version%%.*}"
+    local official_version node_major installed_major setup_script
+    official_version="$(official_node_version)"
+    node_major="${official_version%%.*}"
 
-    if command -v node >/dev/null 2>&1; then
-        installed_version="$(node -p 'process.versions.node')"
-        installed_major="${installed_version%%.*}"
-        if (( installed_major == required_major )) && \
-            dpkg --compare-versions "$installed_version" ge "$required_version"; then
+    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        installed_major="$(node -p 'process.versions.node.split(".")[0]')"
+        if (( installed_major == node_major )); then
             NODE_BIN="$(command -v node)"
-            log_info "Node.js $(node -v) 满足官方 Node ${required_version} 构建基线"
+            log_info "复用现有 Node.js $(node -v)"
             return 0
         fi
-        if (( installed_major > required_major )); then
-            if [[ "${SUBSTORE_ALLOW_NEWER_NODE:-0}" == 1 ]]; then
-                NODE_BIN="$(command -v node)"
-                log_warn "使用高于官方构建主版本的 Node.js $(node -v)"
-                return 0
-            fi
-            die "当前 Node.js $(node -v) 高于官方 Node ${required_version} 构建主版本；为避免影响其他项目，管理器不会自动降级。确认兼容后可设置 SUBSTORE_ALLOW_NEWER_NODE=1。"
-        fi
-        log_warn "当前 Node.js $(node -v) 低于官方构建基线 ${required_version}，将安装 Node ${required_major}.x"
+        log_warn "当前 Node.js 主版本为 ${installed_major}，将使用 NodeSource setup_${node_major}.x 配置安装通道"
     fi
 
     [[ "${SUBSTORE_MANAGER_SKIP_NODE_INSTALL:-0}" != 1 ]] || die "测试模式禁止安装 Node.js"
     setup_script="$(mktemp)"
     register_tmp "$setup_script"
-    curl -fsSL --retry 3 "https://deb.nodesource.com/setup_${required_major}.x" -o "$setup_script"
-    bash -n "$setup_script" || die "NodeSource setup_${required_major}.x 语法检查失败"
-    log_info "执行 NodeSource setup_${required_major}.x 一键配置脚本"
+    curl -fsSL --retry 3 "https://deb.nodesource.com/setup_${node_major}.x" -o "$setup_script"
+    bash -n "$setup_script" || die "NodeSource setup_${node_major}.x 语法检查失败"
+    log_info "执行 NodeSource setup_${node_major}.x 一键配置脚本"
     bash "$setup_script"
     apt-get install -y nodejs
     hash -r
+    command -v node >/dev/null 2>&1 || die "NodeSource 安装完成后仍找不到 node"
+    command -v npm >/dev/null 2>&1 || die "NodeSource 安装完成后仍找不到 npm"
     NODE_BIN="$(command -v node)"
-    installed_major="$(node -p 'process.versions.node.split(".")[0]')"
-    (( installed_major >= required_major )) || die "Node.js 安装后版本仍不满足要求"
     log_info "已安装 Node.js $(node -v)"
 }
 
