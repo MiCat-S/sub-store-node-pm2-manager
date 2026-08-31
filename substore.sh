@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 077
 
-MANAGER_VERSION="1.1.0"
+MANAGER_VERSION="1.2.0"
 MANAGER_ID="MiCat-S/sub-store-node-pm2-manager"
 BACKEND_REPO="sub-store-org/Sub-Store"
 FRONTEND_REPO="sub-store-org/Sub-Store-Front-End"
@@ -85,6 +85,7 @@ AUTO_UPDATE_WAS_ENABLED=0
 AUTO_UPDATE_WAS_ACTIVE=0
 UNINSTALL_TRANSACTION_ACTIVE=0
 UNINSTALL_ORIGINAL_STATUS=""
+UNINSTALL_STAGE_COUNT=0
 UNINSTALL_ORIGINAL_PATHS=()
 UNINSTALL_STAGED_PATHS=()
 DEPLOY_DIR_EXISTED=0
@@ -1135,14 +1136,15 @@ begin_auto_update_transaction() {
 }
 
 commit_auto_update_transaction() {
-    cleanup_tmp_path "$AUTO_UPDATE_TRANSACTION_DIR"
-    AUTO_UPDATE_TRANSACTION_DIR=""
     AUTO_UPDATE_TRANSACTION_ACTIVE=0
     AUTO_UPDATE_SERVICE_EXISTED=0
     AUTO_UPDATE_TIMER_EXISTED=0
     AUTO_UPDATE_WAS_ENABLED=0
     AUTO_UPDATE_WAS_ACTIVE=0
     release_update_lock
+    cleanup_tmp_path "$AUTO_UPDATE_TRANSACTION_DIR" || \
+        log_warn "自动更新事务临时备份稍后重试清理：$AUTO_UPDATE_TRANSACTION_DIR"
+    AUTO_UPDATE_TRANSACTION_DIR=""
 }
 
 rollback_auto_update_transaction() {
@@ -1965,7 +1967,7 @@ validate_runtime_layout() {
     path_contains "$FRONTEND_DIR" "$DEPLOY_DIR" && return 1
     if path_contains "$DEPLOY_DIR" "$FRONTEND_DIR"; then
         frontend_top="$(managed_top_level_path "$DEPLOY_DIR" "$FRONTEND_DIR" 2>/dev/null || true)"
-        if [[ "$frontend_top" != "$FRONTEND_DIR" ]]; then
+        if [[ "$frontend_top" != "$(normalize_path "$FRONTEND_DIR")" ]]; then
             log_error "数据目录等于部署目录时，前端只能使用部署根的直接子目录或外部目录：$FRONTEND_DIR"
             return 1
         fi
@@ -2632,18 +2634,18 @@ swap_directory_tree() {
     old_dir="$(mktemp -d "${parent}/.substore-${label}-old.XXXXXX")" || return 1
     rmdir -- "$old_dir" || return 1
     if [[ -e "$target" ]]; then
-        mv -- "$target" "$old_dir" || return 1
+        mv -T -- "$target" "$old_dir" || return 1
     else
         old_dir=""
     fi
-    if mv -- "$new_dir" "$target"; then
+    if mv -T -- "$new_dir" "$target"; then
         unregister_tmp_path "$new_dir"
         if [[ -n "$old_dir" ]]; then
             rm -rf -- "$old_dir" || log_warn "旧目录清理失败，请手工删除：$old_dir"
         fi
         return 0
     fi
-    if [[ -n "$old_dir" ]] && ! mv -- "$old_dir" "$target"; then
+    if [[ -n "$old_dir" ]] && ! mv -T -- "$old_dir" "$target"; then
         log_error "目录切换失败，原目录保留在：$old_dir"
     fi
     return 1
@@ -2728,7 +2730,7 @@ create_backup() {
         cleanup_tmp_path "$partial_dir"
         return 1
     }
-    mv -- "$partial_dir" "$backup_dir" || { cleanup_tmp_path "$partial_dir"; return 1; }
+    mv -T -- "$partial_dir" "$backup_dir" || { cleanup_tmp_path "$partial_dir"; return 1; }
     unregister_tmp_path "$partial_dir"
     LAST_BACKUP_DIR="$backup_dir"
     log_info "备份完成：$backup_dir"
@@ -3087,16 +3089,18 @@ commit_env_transaction() {
             rm -f -- "$marker" || log_warn "旧前端目录管理标记清理失败：$marker"
         fi
     fi
-    cleanup_tmp_path "$ENV_TRANSACTION_BACKUP"
-    cleanup_tmp_path "$STATE_TRANSACTION_BACKUP"
-    ENV_TRANSACTION_BACKUP=""
-    STATE_TRANSACTION_BACKUP=""
     ENV_TRANSACTION_ACTIVE=0
     ENV_TRANSACTION_ORIGINAL_DATA_DIR=""
     ENV_TRANSACTION_ORIGINAL_FRONTEND_DIR=""
     ENV_TRANSACTION_CREATED_DATA_DIR=0
     release_update_lock
     release_manager_lock
+    cleanup_tmp_path "$ENV_TRANSACTION_BACKUP" || \
+        log_warn "Env 事务临时备份稍后重试清理：$ENV_TRANSACTION_BACKUP"
+    cleanup_tmp_path "$STATE_TRANSACTION_BACKUP" || \
+        log_warn "状态事务临时备份稍后重试清理：$STATE_TRANSACTION_BACKUP"
+    ENV_TRANSACTION_BACKUP=""
+    STATE_TRANSACTION_BACKUP=""
 }
 
 rollback_env_transaction() {
@@ -3532,19 +3536,17 @@ printf "%-20s %-24s %-8s %-28s %s\\n" \
 
 list_instances() {
     local state_path instance_name
-    local -a state_files=()
     require_root
     printf '%-20s %-24s %-8s %-28s %s\n' 实例 PM2名称 端口 部署目录 后端版本
-    if [[ -f "${STATE_BASE}/instance.conf" ]]; then
-        print_instance_summary default "${STATE_BASE}/instance.conf"
-    fi
-    shopt -s nullglob
-    state_files=("${STATE_BASE}"/instances/*/instance.conf)
-    shopt -u nullglob
-    for state_path in "${state_files[@]}"; do
-        instance_name="$(basename -- "$(dirname -- "$state_path")")"
+    while IFS= read -r state_path; do
+        [[ -n "$state_path" ]] || continue
+        if [[ "$state_path" == "${STATE_BASE}/instance.conf" ]]; then
+            instance_name=default
+        else
+            instance_name="$(basename -- "$(dirname -- "$state_path")")"
+        fi
         print_instance_summary "$instance_name" "$state_path"
-    done
+    done < <(managed_state_files)
 }
 
 show_version() {
@@ -3576,8 +3578,13 @@ show_logs() {
     pm2 logs "$PM2_NAME" --lines 100
 }
 
-start_managed_instance() {
-    local original_status port_status expected_version
+start_or_restart_managed_instance() {
+    local action="$1" label original_status port_status expected_version
+    case "$action" in
+        start) label="启动" ;;
+        restart) label="重启" ;;
+        *) die "未知 PM2 操作：$action" ;;
+    esac
     require_root
     require_command flock
     acquire_update_lock_wait
@@ -3590,7 +3597,7 @@ start_managed_instance() {
         missing|stopped|errored)
             if port_in_use "$PORT"; then
                 release_update_lock
-                log_error "端口已被其他进程占用，未启动 Sub-Store：$PORT"
+                log_error "端口已被其他进程占用，未${label} Sub-Store：$PORT"
                 return 1
             else
                 port_status=$?
@@ -3603,20 +3610,26 @@ start_managed_instance() {
             ;;
         *)
             release_update_lock
-            log_error "PM2 状态不适合启动：$original_status"
+            log_error "PM2 状态不适合${label}：$original_status"
             return 1
             ;;
     esac
-    if ! start_instance || ! wait_for_health "$expected_version"; then
+    if { [[ "$action" == start ]] && ! start_instance; } || \
+        { [[ "$action" == restart ]] && ! restart_instance; } || \
+        ! wait_for_health "$expected_version"; then
         if [[ "$original_status" == missing ]]; then
-            delete_pm2_instance >/dev/null 2>&1 || log_error "启动失败后清理 PM2 进程失败：$PM2_NAME"
+            delete_pm2_instance >/dev/null 2>&1 || log_error "${label}失败后清理 PM2 进程失败：$PM2_NAME"
         elif [[ "$original_status" != online ]]; then
-            stop_instance 1 >/dev/null 2>&1 || log_error "启动失败后恢复停止状态失败：$PM2_NAME"
+            stop_instance 1 >/dev/null 2>&1 || log_error "${label}失败后恢复停止状态失败：$PM2_NAME"
         fi
         release_update_lock
         return 1
     fi
     release_update_lock
+}
+
+start_managed_instance() {
+    start_or_restart_managed_instance start
 }
 
 stop_managed_instance() {
@@ -3633,46 +3646,7 @@ stop_managed_instance() {
 }
 
 restart_managed_instance() {
-    local original_status port_status expected_version
-    require_root
-    require_command flock
-    acquire_update_lock_wait
-    load_state || { release_update_lock; die "实例状态不存在"; }
-    prepare_managed_runtime
-    expected_version="$(backend_version_from_file "$BACKEND_FILE" || true)"
-    original_status="$(pm2_process_status)" || { release_update_lock; return 1; }
-    case "$original_status" in
-        online) ;;
-        missing|stopped|errored)
-            if port_in_use "$PORT"; then
-                release_update_lock
-                log_error "端口已被其他进程占用，未重启 Sub-Store：$PORT"
-                return 1
-            else
-                port_status=$?
-                if (( port_status != 1 )); then
-                    release_update_lock
-                    log_error "无法确认监听端口是否可用：$PORT"
-                    return 1
-                fi
-            fi
-            ;;
-        *)
-            release_update_lock
-            log_error "PM2 状态不适合重启：$original_status"
-            return 1
-            ;;
-    esac
-    if ! restart_instance || ! wait_for_health "$expected_version"; then
-        if [[ "$original_status" == missing ]]; then
-            delete_pm2_instance >/dev/null 2>&1 || log_error "重启失败后清理 PM2 进程失败：$PM2_NAME"
-        elif [[ "$original_status" != online ]]; then
-            stop_instance 1 >/dev/null 2>&1 || log_error "重启失败后恢复停止状态失败：$PM2_NAME"
-        fi
-        release_update_lock
-        return 1
-    fi
-    release_update_lock
+    start_or_restart_managed_instance restart
 }
 
 auto_update_units_owned() {
@@ -3724,6 +3698,12 @@ restore_pm2_after_failed_delete() {
 stage_uninstall_path() {
     local original="$1" parent staged
     [[ -e "$original" || -L "$original" ]] || return 0
+    ((UNINSTALL_STAGE_COUNT += 1))
+    if [[ "${SUBSTORE_MANAGER_TESTING:-0}" == 1 && \
+        "${SUBSTORE_MANAGER_TEST_FAIL_UNINSTALL_STAGE_AT:-0}" == "$UNINSTALL_STAGE_COUNT" ]]; then
+        log_warn "测试模式：在第 ${UNINSTALL_STAGE_COUNT} 个卸载暂存步骤注入失败"
+        return 1
+    fi
     parent="$(dirname -- "$original")"
     staged="$(mktemp -d "${parent}/.substore-uninstall.XXXXXX")" || return 1
     if ! rmdir -- "$staged"; then
@@ -3753,7 +3733,7 @@ rollback_uninstall_transaction() {
         original="${UNINSTALL_ORIGINAL_PATHS[$index]}"
         staged="${UNINSTALL_STAGED_PATHS[$index]}"
         [[ -e "$staged" || -L "$staged" ]] || continue
-        if [[ -e "$original" || -L "$original" ]] || ! mv -- "$staged" "$original"; then
+        if [[ -e "$original" || -L "$original" ]] || ! mv -T -- "$staged" "$original"; then
             log_error "卸载回滚无法恢复路径：$original（暂存：$staged）"
             result=1
         fi
@@ -3768,15 +3748,16 @@ rollback_uninstall_transaction() {
     UNINSTALL_ORIGINAL_PATHS=()
     UNINSTALL_STAGED_PATHS=()
     UNINSTALL_ORIGINAL_STATUS=""
+    UNINSTALL_STAGE_COUNT=0
     return "$result"
 }
 
 commit_uninstall_transaction() {
     local staged
-    UNINSTALL_TRANSACTION_ACTIVE=0
     if [[ "$AUTO_UPDATE_TRANSACTION_ACTIVE" == 1 ]]; then
-        commit_auto_update_transaction
+        commit_auto_update_transaction || return 1
     fi
+    UNINSTALL_TRANSACTION_ACTIVE=0
     for staged in "${UNINSTALL_STAGED_PATHS[@]}"; do
         if [[ -e "$staged" || -L "$staged" ]]; then
             rm -rf -- "$staged" || log_warn "卸载内容已移出原路径，但暂存文件清理失败：$staged"
@@ -3785,6 +3766,7 @@ commit_uninstall_transaction() {
     UNINSTALL_ORIGINAL_PATHS=()
     UNINSTALL_STAGED_PATHS=()
     UNINSTALL_ORIGINAL_STATUS=""
+    UNINSTALL_STAGE_COUNT=0
 }
 
 validate_uninstall_preconditions() {
@@ -3861,6 +3843,7 @@ uninstall_instance() {
     original_status="$PM2_STATUS"
     remove_auto_update_units 1 || die "停用自动更新失败，已取消卸载"
     UNINSTALL_ORIGINAL_STATUS="$original_status"
+    UNINSTALL_STAGE_COUNT=0
     UNINSTALL_TRANSACTION_ACTIVE=1
     if ! delete_pm2_instance; then
         rollback_uninstall_transaction || log_error "删除 PM2 后恢复原实例不完整"

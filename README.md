@@ -167,7 +167,7 @@ PM2 进程名称 [sub-store]:
 随后填写：
 
 ```text
-检查间隔（分钟，最小 5） [60]:
+检查间隔（分钟，最小 15） [60]:
 ```
 
 小白建议保持每 60 分钟检查一次。
@@ -308,7 +308,7 @@ sudo substore auto
 
 自动更新会同时检查后端官方 `sub-store.bundle.js` 和前端官方 `dist.zip`。
 
-没有新版本时不会重启 Sub-Store。有新版本时会先备份，再更新前端和后端；更新或健康检查失败时会自动恢复旧版本。
+没有新版本时不会下载资产或重启 Sub-Store。只有前端变化时会原子替换前端目录，不停止或重启后端；后端变化时才会停止、更新并恢复原来的 online/stopped 状态。更新或健康检查失败时会自动恢复旧版本。
 
 自动更新由 systemd timer 调度，不会再创建一个一直运行的 PM2 updater。
 
@@ -334,8 +334,10 @@ journalctl -u substore-manager-update.service -n 100 --no-pager
 
 - 开机约 10 分钟后检查
 - 默认每 60 分钟检查
+- 最短允许设置为 15 分钟
 - 加入最多 5 分钟随机延迟
 - 手动更新和定时更新不会同时执行
+- 默认只保留当前实例最近 10 份完整备份
 
 ## ⬆️ 手动更新
 
@@ -351,7 +353,7 @@ sudo substore update
 2. 查询两个官方 GitHub Release。
 3. 没有更新时直接退出，不重启服务。
 4. 有更新时下载并校验文件大小和 SHA-256。
-5. 停止当前实例并备份程序、前端、Env、PM2 配置和数据。
+5. 备份本次会改变的程序、前端、Env、PM2 配置和数据；纯前端更新不会停止后端。
 6. 替换需要更新的文件。
 7. 重启 PM2，检查端口和 API。
 8. 检查失败时恢复更新前版本。
@@ -363,6 +365,8 @@ sudo substore update
 ```
 
 更新不会改变自定义端口、PM2 名称、`.env`、数据目录、前端目录或后端随机路径。
+
+默认保留最近 10 份由当前实例创建的备份。非交互安装时可通过 `SUBSTORE_BACKUP_RETENTION=1..100` 修改数量；失败更新也会执行同一保留策略，避免定时任务反复失败时耗尽磁盘。
 
 ## 🖥️ 修改前端目录
 
@@ -470,6 +474,10 @@ second： substore-manager-update-second.timer
 
 如果服务器有多个未管理的 Sub-Store PM2 进程，脚本会列出来供选择。已经被其他管理实例记录的 PM2 进程不会重复导入。
 
+为保证以后能从管理器生成的 ecosystem 文件恢复，导入实例不能依赖 `.env` 之外的 `SUB_STORE_*` PM2 Env，也不能带额外 `args` 或 `node_args`；检测到差异时会拒绝导入并说明原因。
+
+如果旧部署把数据直接放在部署根目录（官方默认 `.`），前端可以放在部署根的直接子目录，例如 `/opt/app/frontend`，也可以放在部署目录外。`/opt/app/public/frontend` 这类与其他数据共用父目录的多层嵌套布局无法安全做精确回滚，因此会被拒绝。
+
 ## ⚙️ Env 是什么
 
 Env 是 Sub-Store 的环境变量配置，保存在：
@@ -546,11 +554,13 @@ SUB_STORE_MMDB_*
 
 ## 🟢 Node.js 和 PM2 怎么安装
 
-脚本读取 Sub-Store 官方 `.node-version`，只使用其中的主版本选择 NodeSource 安装通道。
+如果系统已经同时存在可用的 `node` 和 `npm`，脚本会直接复用，不替换系统 Node.js，也不重复执行 NodeSource。
+
+只有系统缺少 Node.js 或 npm 时，脚本才读取 Sub-Store 官方 `.node-version`，并使用其中的主版本选择 NodeSource 安装通道。
 
 例如官方文件是 `24.15.0`，脚本会选择 `setup_24.x`，不会强制安装 `24.15.0`。APT 最终安装 NodeSource 当前提供的 Node 24 版本。
 
-同主版本的现有 Node.js 会直接使用。需要安装时，脚本会：
+需要安装时，脚本会：
 
 1. 下载 NodeSource 一键配置脚本。
 2. 使用 `bash -n` 做语法检查。
@@ -589,6 +599,10 @@ sudo substore --instance second uninstall
 脚本只删除当前管理实例，不会删除系统 Node.js、全局 PM2、其他 PM2 项目、其他 Sub-Store 实例或其他 Node.js 项目。
 
 数据默认保留。选择删除数据时，需要输入带实例 ID 的二次确认。只有由管理器新建的数据目录才允许自动删除；安装前已经存在或从旧实例导入的数据目录不会自动删除。
+
+选择保留数据时，更新备份也会一并保留。导入实例卸载时会从 PM2 删除该进程，但会保留原程序、`.env`、前端和数据；确认界面会明确显示这一点。
+
+卸载先把准备删除的路径原子移到同文件系统的隐藏暂存位置。全部步骤成功后才清理暂存内容；普通命令失败、`EXIT`、`TERM` 等中断会尝试搬回并恢复 PM2 与自动更新配置。
 
 ## 🤖 非交互安装
 
@@ -681,7 +695,23 @@ api.github.com
 raw.githubusercontent.com
 ```
 
-低频更新通常不需要 GitHub Token。需要 Token 时只在当前 Shell 环境中导出，不要写入仓库或日志。
+低频更新通常不需要 GitHub Token。临时手动更新可以只在当前 Shell 导出 `GITHUB_TOKEN`。
+
+systemd 定时更新需要长期使用 Token 时，将它单独放在 root-only 文件中，不要写入 Sub-Store `.env`、仓库或日志：
+
+```bash
+sudo install -d -m 700 /etc/substore-manager
+sudo nano /etc/substore-manager/github.env
+sudo chmod 600 /etc/substore-manager/github.env
+```
+
+文件内容：
+
+```text
+GITHUB_TOKEN="github_pat_..."
+```
+
+随后重新执行 `sudo substore auto` 启用或刷新 timer。所有实例共享这个管理器凭据文件；Release 资产下载本身仍使用无认证请求。
 
 ## 📚 实现依据
 
@@ -693,7 +723,7 @@ raw.githubusercontent.com
 - [Xream Sub-Store 自建教程](https://xream.notion.site/Sub-Store-Docker-8efc1aea40fa431b9a562b78994e7fb8)
 - [xream/sub-store Docker 文档](https://hub.docker.com/r/xream/sub-store)
 
-当前审计基线日期为 2026-08-29：后端 `2.36.40`、前端 `2.29.10`、官方 `.node-version` 为 `24.15.0`。脚本运行时会查询最新 Release，不会固定下载这些版本。
+当前审计基线日期为 2026-08-31：后端 `2.36.55`、前端 `2.29.10`、官方 `.node-version` 为 `24.15.0`。脚本运行时会查询最新 Release，不会固定下载这些版本。
 
 ## 📄 许可证
 
@@ -714,8 +744,12 @@ Sub-Store 前端、后端及下载的 Release 资产仍分别遵循其上游项�
 - 自定义端口和前端目录测试
 - 前后端成功更新测试
 - 更新失败回滚测试
+- PM2 重启失败和健康检查失败回滚测试
+- 首次安装失败清理与重复安装幂等测试
 - 数据和 Env 保留测试
 - 双实例同时运行和隔离测试
+- 已有 PM2 部署导入测试
+- amd64、ARM64 和无预装 Node.js 的 Linux 测试
 - 安全卸载测试
 
 运行基础测试：
@@ -742,5 +776,7 @@ TEST_NODE_INSTALL=1 ./tests/docker-integration.sh
 在 ARM64 Docker daemon 上测试：
 
 ```bash
-TEST_PLATFORM=linux/arm64 ./tests/docker-integration.sh
+TEST_PLATFORM=linux/arm64 TEST_SMOKE_ONLY=1 ./tests/docker-integration.sh
 ```
+
+仓库的 GitHub Actions 会自动运行静态检查、官方 Env 漂移检查、amd64 完整集成、ARM64 冒烟测试和 Ubuntu 无预装 Node.js 安装测试。

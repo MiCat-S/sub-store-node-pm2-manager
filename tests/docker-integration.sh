@@ -296,7 +296,8 @@ for _ in $(seq 1 45); do
     sleep 1
 done
 test "$(pm2_status sub-store-manual)" = online
-printf 'y\ny\n' | /usr/local/sbin/substore-test --instance imported install
+printf 'y\ny\n' | env SUBSTORE_NON_INTERACTIVE=0 \
+    /usr/local/sbin/substore-test --instance imported install
 test -f /etc/substore-manager-test/instances/imported/instance.conf
 test -f "$manual_dir/.substore-manager.ecosystem.config.cjs"
 test "$(pm2_status sub-store-manual)" = online
@@ -332,6 +333,19 @@ test -f "$manual_dir/.env"
 test -f "$manual_data/sentinel.txt"
 test -f "$manual_frontend/index.html"
 test "$(pm2_status sub-store-manual)" = missing
+
+phase 'failed uninstall rollback and final default uninstall'
+if printf 'y\nn\n' | env \
+    SUBSTORE_MANAGER_TESTING=1 \
+    SUBSTORE_MANAGER_TEST_FAIL_UNINSTALL_STAGE_AT=2 \
+    /usr/local/sbin/substore-test uninstall; then
+    fail 'injected uninstall staging failure unexpectedly succeeded'
+fi
+test "$(pm2_status sub-store-integration)" = online
+test -f /opt/substore-test/sub-store.bundle.js
+test -f /opt/substore-test/.env
+test -f /etc/substore-manager-test/instance.conf
+test -f /var/lib/substore-test/.substore-manager-data
 
 printf 'y\nn\n' | /usr/local/sbin/substore-test uninstall
 test -f /var/lib/substore-test/sentinel.txt

@@ -203,6 +203,13 @@ assert_eq 7 "$RELEASE_SIZE" "release size after empty digest"
 assert_eq "$tmp_count_before" "${#TMP_PATHS[@]}" "release metadata temp files unregistered"
 GITHUB_API_BASE="$old_github_api_base"
 
+digest_file="$TEST_ROOT/digest.bin"
+printf '1234567' >"$digest_file"
+verify_download "$digest_file" '' 7 >/dev/null 2>&1 || fail "empty digest should be allowed"
+if (trap - EXIT; verify_download "$digest_file" 'sha512:unsupported' 7 >/dev/null 2>&1); then
+    fail "unsupported non-empty digest was accepted"
+fi
+
 TMP_PATHS=()
 registered_tmp=""
 make_temp_dir registered_tmp "$TEST_ROOT/tmp-parent" .registered
@@ -265,6 +272,14 @@ FRONTEND_DIR="$DEPLOY_DIR/.substore-update.payload"
 expect_layout_failure "frontend using temporary directory prefix accepted"
 FRONTEND_DIR="$layout_root/deploy-link"
 expect_layout_failure "symlink alias of deploy directory accepted"
+
+DATA_DIR="$DEPLOY_DIR"
+FRONTEND_DIR="$DEPLOY_DIR/frontend"
+validate_runtime_layout || fail "direct frontend child rejected for root data layout"
+FRONTEND_DIR="$DEPLOY_DIR/public/frontend"
+if validate_runtime_layout >/dev/null 2>&1; then
+    fail "nested frontend accepted when data directory equals deploy directory"
+fi
 
 DEPLOY_DIR="$TEST_ROOT/deploy"
 BACKEND_FILE="$DEPLOY_DIR/sub-store.bundle.js"
@@ -627,6 +642,33 @@ if ! (
     fi
 ); then
     fail "failed data-root move did not preserve and restore current data"
+fi
+
+if ! (
+    trap - EXIT
+    archive_root="$TEST_ROOT/data-root-archive"
+    DEPLOY_DIR="$archive_root/deploy"
+    DATA_DIR="$DEPLOY_DIR"
+    BACKEND_FILE="$DEPLOY_DIR/sub-store.bundle.js"
+    FRONTEND_DIR="$DEPLOY_DIR/frontend"
+    ENV_FILE="$DEPLOY_DIR/.env"
+    ECOSYSTEM_FILE="$DEPLOY_DIR/ecosystem.config.cjs"
+    MARKER_FILE="$DEPLOY_DIR/.substore-manager-instance"
+    archive_file="$archive_root/data.tar.gz"
+    mkdir -p "$DEPLOY_DIR" "$FRONTEND_DIR" \
+        "$DEPLOY_DIR/.substore-frontend-old.stale" \
+        "$DEPLOY_DIR/.substore-data-old.stale" \
+        "$DEPLOY_DIR/.substore-backend.stale" \
+        "$DEPLOY_DIR/.substore-uninstall.stale"
+    printf '%s\n' keep >"$DEPLOY_DIR/data.json"
+    printf '%s\n' skip >"$FRONTEND_DIR/index.html"
+    create_data_archive "$archive_file"
+    tar -tzf "$archive_file" | grep -Fq './data.json'
+    if tar -tzf "$archive_file" | grep -Eq '\./\.substore-(frontend|data|backend|uninstall)'; then
+        exit 1
+    fi
+); then
+    fail "data archive included manager temporary directories"
 fi
 
 setup_auto_update_test_case() {
