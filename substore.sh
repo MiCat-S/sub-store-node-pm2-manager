@@ -1124,8 +1124,12 @@ begin_auto_update_transaction() {
         return 1
     }
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl is-enabled "$AUTO_UPDATE_TIMER_NAME" >/dev/null 2>&1 && AUTO_UPDATE_WAS_ENABLED=1 || true
-        systemctl is-active "$AUTO_UPDATE_TIMER_NAME" >/dev/null 2>&1 && AUTO_UPDATE_WAS_ACTIVE=1 || true
+        if systemctl is-enabled "$AUTO_UPDATE_TIMER_NAME" >/dev/null 2>&1; then
+            AUTO_UPDATE_WAS_ENABLED=1
+        fi
+        if systemctl is-active "$AUTO_UPDATE_TIMER_NAME" >/dev/null 2>&1; then
+            AUTO_UPDATE_WAS_ACTIVE=1
+        fi
     fi
     AUTO_UPDATE_TRANSACTION_ACTIVE=1
 }
@@ -2838,7 +2842,9 @@ restore_backup() {
     if [[ "$include_backend" == 1 ]]; then
         restart_instance 0 || return 1
         if ! wait_for_health "$health_version"; then
-            [[ "$desired_status" == stopped ]] && stop_instance 0 >/dev/null 2>&1 || true
+            if [[ "$desired_status" == stopped ]]; then
+                stop_instance 0 >/dev/null 2>&1 || true
+            fi
             return 1
         fi
         if [[ "$desired_status" == stopped ]]; then

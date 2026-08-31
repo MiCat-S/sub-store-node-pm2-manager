@@ -30,6 +30,10 @@ fail() {
     exit 1
 }
 
+phase() {
+    printf '\n== %s ==\n' "$1"
+}
+
 pm2_status() {
     pm2 jlist | node -e '
 let input = "";
@@ -40,12 +44,12 @@ process.stdin.on("data", chunk => input += chunk).on("end", () => {
 ' "$1"
 }
 
-pm2_restarts() {
+pm2_pid() {
     pm2 jlist | node -e '
 let input = "";
 process.stdin.on("data", chunk => input += chunk).on("end", () => {
   const app = JSON.parse(input).find(item => item.name === process.argv[1]);
-  process.stdout.write(String(app?.pm2_env?.restart_time ?? -1));
+  process.stdout.write(String(app?.pid ?? -1));
 });
 ' "$1"
 }
@@ -94,6 +98,7 @@ export SUBSTORE_PM2_NAME=sub-store-integration
 export SUBSTORE_HOST=127.0.0.1
 export SUBSTORE_MAGIC_PATH=/integration-path
 
+phase 'failed install cleanup and retry'
 if env \
     SUBSTORE_MANAGER_TESTING=1 \
     SUBSTORE_MANAGER_TEST_FAIL_HEALTH_ONCE=1 \
@@ -124,11 +129,12 @@ exit 99
 EOF
 chmod 755 /tmp/substore-no-network/curl
 backend_hash_before_repeat="$(sha256sum /opt/substore-test/sub-store.bundle.js | awk '{print $1}')"
-restarts_before_repeat="$(pm2_restarts sub-store-integration)"
+pid_before_repeat="$(pm2_pid sub-store-integration)"
 PATH="/tmp/substore-no-network:$PATH" /usr/local/sbin/substore-test install
 test "$(sha256sum /opt/substore-test/sub-store.bundle.js | awk '{print $1}')" = "$backend_hash_before_repeat"
-test "$(pm2_restarts sub-store-integration)" = "$restarts_before_repeat"
+test "$(pm2_pid sub-store-integration)" = "$pid_before_repeat"
 
+phase 'idempotent PM2 lifecycle'
 /usr/local/sbin/substore-test stop
 /usr/local/sbin/substore-test stop
 test "$(pm2_status sub-store-integration)" = stopped
@@ -139,6 +145,7 @@ test "$(pm2_status sub-store-integration)" = online
 test "$(pm2_status sub-store-integration)" = online
 
 if [[ "$TEST_SMOKE_ONLY" == 1 ]]; then
+    phase 'smoke update and uninstall'
     /usr/local/sbin/substore-test update
     printf 'y\nn\n' | /usr/local/sbin/substore-test uninstall
     test -d /var/lib/substore-test
@@ -148,6 +155,7 @@ if [[ "$TEST_SMOKE_ONLY" == 1 ]]; then
     exit 0
 fi
 
+phase 'port rollback and successful port change'
 if env \
     SUBSTORE_MANAGER_TESTING=1 \
     SUBSTORE_MANAGER_TEST_FAIL_HEALTH_ONCE=1 \
@@ -162,6 +170,7 @@ ss -ltnH 'sport = :39031' | grep -q .
 grep -Fq 'SUB_STORE_BACKEND_API_PORT="39032"' /opt/substore-test/.env
 ss -ltnH 'sport = :39032' | grep -q .
 
+phase 'cross-instance conflict and second instance'
 if env \
     SUBSTORE_INSTALL_DIR=/opt/substore-conflict \
     SUBSTORE_DATA_DIR=/var/lib/substore-test \
@@ -190,30 +199,32 @@ printf 'second-sentinel\n' >/var/lib/substore-second/sentinel.txt
 /usr/local/sbin/substore-test instances | grep -q second
 
 printf 'persistent-sentinel\n' >/var/lib/substore-test/sentinel.txt
-frontend_restarts_before="$(pm2_restarts sub-store-integration)"
+phase 'frontend-only update and no-op update'
+frontend_pid_before="$(pm2_pid sub-store-integration)"
 backups_before_frontend="$(backup_count /opt/substore-test/backups)"
 env \
     SUBSTORE_MANAGER_TESTING=1 \
     SUBSTORE_MANAGER_TEST_FORCE_FRONTEND_UPDATE=1 \
     /usr/local/sbin/substore-test update
-test "$(pm2_restarts sub-store-integration)" = "$frontend_restarts_before"
+test "$(pm2_pid sub-store-integration)" = "$frontend_pid_before"
 test "$(cat /var/lib/substore-test/sentinel.txt)" = persistent-sentinel
 test "$(cat /var/lib/substore-second/sentinel.txt)" = second-sentinel
 test "$(backup_count /opt/substore-test/backups)" -gt "$backups_before_frontend"
 
 backups_before_noop="$(backup_count /opt/substore-test/backups)"
-restarts_before_noop="$(pm2_restarts sub-store-integration)"
+pid_before_noop="$(pm2_pid sub-store-integration)"
 /usr/local/sbin/substore-test update
 test "$(backup_count /opt/substore-test/backups)" = "$backups_before_noop"
-test "$(pm2_restarts sub-store-integration)" = "$restarts_before_noop"
+test "$(pm2_pid sub-store-integration)" = "$pid_before_noop"
 
-restarts_before_backend="$(pm2_restarts sub-store-integration)"
+phase 'backend update and rollback failures'
+pid_before_backend="$(pm2_pid sub-store-integration)"
 env \
     SUBSTORE_MANAGER_TESTING=1 \
     SUBSTORE_MANAGER_TEST_FORCE_BACKEND_UPDATE=1 \
     /usr/local/sbin/substore-test update
 test "$(pm2_status sub-store-integration)" = online
-test "$(pm2_restarts sub-store-integration)" -gt "$restarts_before_backend"
+test "$(pm2_pid sub-store-integration)" != "$pid_before_backend"
 test "$(cat /var/lib/substore-test/sentinel.txt)" = persistent-sentinel
 
 backend_before_restart_failure="$(sha256sum /opt/substore-test/sub-store.bundle.js | awk '{print $1}')"
@@ -241,6 +252,7 @@ test "$(sha256sum /srv/substore-frontend/index.html | awk '{print $1}')" = "$fro
 test "$(sha256sum /opt/substore-test/.env | awk '{print $1}')" = "$env_before_health_failure"
 test "$(pm2_status sub-store-integration)" = online
 
+phase 'stopped-state update and marker refusal'
 /usr/local/sbin/substore-test stop
 env \
     SUBSTORE_MANAGER_TESTING=1 \
@@ -257,6 +269,7 @@ fi
 test "$(pm2_status sub-store-integration)" = online
 printf '%s\n' "$install_id" >/var/lib/substore-test/.substore-manager-data
 
+phase 'import existing PM2 deployment'
 manual_dir=/opt/manual-substore
 manual_data=/var/lib/manual-substore
 manual_frontend=/srv/manual-substore-frontend
@@ -289,6 +302,7 @@ test -f "$manual_dir/.substore-manager.ecosystem.config.cjs"
 test "$(pm2_status sub-store-manual)" = online
 printf 'manual-sentinel\n' >"$manual_data/sentinel.txt"
 
+phase 'delete-data and preserve-data uninstall paths'
 env \
     SUBSTORE_INSTALL_DIR=/opt/substore-delete \
     SUBSTORE_DATA_DIR=/var/lib/substore-delete \
