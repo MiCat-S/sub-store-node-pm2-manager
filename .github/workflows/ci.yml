@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-and-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: Static checks
+        run: |
+          bash -n substore.sh tests/*.sh
+          shellcheck substore.sh tests/*.sh
+          git diff --check
+      - name: Unit tests
+        run: bash tests/test.sh
+      - name: Official Env drift
+        run: bash tests/check-official-env.sh
+
+  integration-amd64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Full Debian amd64 integration
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: tests/docker-integration.sh
+
+  integration-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - name: Debian arm64 smoke integration
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TEST_PLATFORM: linux/arm64
+          TEST_SMOKE_ONLY: "1"
+        run: tests/docker-integration.sh
+
+  node-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ubuntu install without preinstalled Node.js
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TEST_NODE_INSTALL: "1"
+          TEST_SMOKE_ONLY: "1"
+        run: tests/docker-integration.sh
