@@ -2783,8 +2783,8 @@ BEGIN { unsafe = 0 }
 {
     if ($0 ~ /^\//) unsafe = 1
     count = split($0, parts, "/")
-    for (index = 1; index <= count; index += 1) {
-        if (parts[index] == "..") unsafe = 1
+    for (part_index = 1; part_index <= count; part_index += 1) {
+        if (parts[part_index] == "..") unsafe = 1
     }
 }
 END { exit unsafe }
