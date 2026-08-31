@@ -276,6 +276,7 @@ manual_frontend=/srv/manual-substore-frontend
 mkdir -p "$manual_dir" "$manual_data" "$manual_frontend"
 cp -a /opt/substore-test/sub-store.bundle.js "$manual_dir/"
 cp -a /srv/substore-frontend/. "$manual_frontend/"
+rm -f -- "$manual_frontend/.substore-manager-frontend"
 printf '%s\n' \
     'SUB_STORE_BACKEND_API_PORT="39034"' \
     'SUB_STORE_BACKEND_API_HOST="127.0.0.1"' \
