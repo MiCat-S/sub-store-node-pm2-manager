@@ -141,7 +141,6 @@ install_id="$(bash -c 'source "$1"; printf "%s" "$INSTALL_ID"' _ "$legacy_state"
 rm -f -- /srv/substore-frontend/.substore-manager-frontend
 awk '
     $0 == "STATE_VERSION=2" { print "STATE_VERSION=1"; next }
-    $0 ~ /^FRONTEND_CREATED_BY_MANAGER=/ { next }
     { print }
 ' "$legacy_state" >"$legacy_state_tmp"
 chmod 600 "$legacy_state_tmp"
