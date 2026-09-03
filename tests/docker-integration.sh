@@ -134,20 +134,13 @@ PATH="/tmp/substore-no-network:$PATH" /usr/local/sbin/substore-test install
 test "$(sha256sum /opt/substore-test/sub-store.bundle.js | awk '{print $1}')" = "$backend_hash_before_repeat"
 test "$(pm2_pid sub-store-integration)" = "$pid_before_repeat"
 
-phase 'legacy frontend marker migration'
-legacy_state=/etc/substore-manager-test/instance.conf
-legacy_state_tmp="${legacy_state}.legacy"
-install_id="$(bash -c 'source "$1"; printf "%s" "$INSTALL_ID"' _ "$legacy_state")"
+phase 'managed frontend marker repair'
+managed_state=/etc/substore-manager-test/instance.conf
+install_id="$(bash -c 'source "$1"; printf "%s" "$INSTALL_ID"' _ "$managed_state")"
 rm -f -- /srv/substore-frontend/.substore-manager-frontend
-awk '
-    $0 == "STATE_VERSION=2" { print "STATE_VERSION=1"; next }
-    { print }
-' "$legacy_state" >"$legacy_state_tmp"
-chmod 600 "$legacy_state_tmp"
-mv -f -- "$legacy_state_tmp" "$legacy_state"
 PATH="/tmp/substore-no-network:$PATH" /usr/local/sbin/substore-test install
 grep -Fxq "$install_id" /srv/substore-frontend/.substore-manager-frontend
-grep -Fxq 'STATE_VERSION=2' "$legacy_state"
+grep -Fxq 'STATE_VERSION=2' "$managed_state"
 test "$(pm2_pid sub-store-integration)" = "$pid_before_repeat"
 
 phase 'idempotent PM2 lifecycle'

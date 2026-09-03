@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 077
 
-MANAGER_VERSION="1.2.1"
+MANAGER_VERSION="1.2.2"
 MANAGER_ID="MiCat-S/sub-store-node-pm2-manager"
 BACKEND_REPO="sub-store-org/Sub-Store"
 FRONTEND_REPO="sub-store-org/Sub-Store-Front-End"
@@ -843,16 +843,16 @@ validate_instance_core_files() {
     [[ -f "$FRONTEND_DIR/index.html" ]] || { log_error "前端入口不存在：$FRONTEND_DIR/index.html"; return 1; }
 }
 
-migrate_legacy_frontend_marker() {
-    local marker state_frontend state_data env_frontend env_data value
+repair_missing_frontend_marker() {
+    local allow_current_state="${1:-0}" marker state_frontend state_data env_frontend env_data value
     marker="$(frontend_marker_path)"
     manager_marker_matches "$marker" && return 0
     [[ ! -e "$marker" && ! -L "$marker" ]] || return 0
-    [[ "$STATE_VERSION" == 1 ]] || return 0
+    [[ "$STATE_VERSION" == 1 || "$allow_current_state" == 1 ]] || return 0
 
     validate_instance_core_files || return 1
     if ! manager_marker_matches "${DATA_DIR}/.substore-manager-data"; then
-        log_error "旧版本实例的数据目录管理标记缺失或不匹配：$DATA_DIR"
+        log_error "实例的数据目录管理标记缺失或不匹配：$DATA_DIR"
         return 1
     fi
     if ! validate_absolute_path "$DEPLOY_DIR" || \
@@ -860,7 +860,7 @@ migrate_legacy_frontend_marker() {
         ! validate_absolute_path "$FRONTEND_DIR" || \
         ! validate_runtime_layout || \
         ! assert_paths_not_managed_elsewhere; then
-        log_error "旧版本实例的目录布局或跨实例占用不安全，未补写前端管理标记"
+        log_error "实例的目录布局或跨实例占用不安全，未恢复前端管理标记"
         return 1
     fi
 
@@ -871,21 +871,21 @@ migrate_legacy_frontend_marker() {
     value="$(env_get "$ENV_FILE" SUB_STORE_DATA_BASE_PATH 2>/dev/null || true)"
     env_data="$(resolve_config_path "$value" "$DEPLOY_DIR")"
     if [[ "$env_frontend" != "$state_frontend" || "$env_data" != "$state_data" ]]; then
-        log_error "旧版本实例的 Env 目录与状态文件不一致，未补写前端管理标记"
+        log_error "实例的 Env 目录与状态文件不一致，未恢复前端管理标记"
         return 1
     fi
 
     write_frontend_marker || {
-        log_error "旧版本实例的前端管理标记补写失败：$FRONTEND_DIR"
+        log_error "实例的前端管理标记恢复失败：$FRONTEND_DIR"
         return 1
     }
     STATE_VERSION=2
     save_state || {
         rm -f -- "$marker" 2>/dev/null || true
-        log_error "旧版本实例状态升级失败，已撤销前端管理标记"
+        log_error "实例状态保存失败，已撤销前端管理标记"
         return 1
     }
-    log_info "已补全旧版本实例的前端管理标记：$FRONTEND_DIR"
+    log_info "已恢复实例的前端管理标记：$FRONTEND_DIR"
 }
 
 validate_instance_files() {
@@ -1360,9 +1360,11 @@ configure_auto_update_after_install() {
 
 repair_managed_installation() {
     require_command flock
+    require_command realpath
     acquire_manager_lock_wait
     acquire_update_lock_wait
     load_state || { release_update_lock; release_manager_lock; die "实例状态不存在"; }
+    repair_missing_frontend_marker 1 || die "实例前端管理标记修复失败"
     prepare_managed_runtime
     install_manager_command || log_warn "管理命令更新失败：$MANAGER_INSTALL_PATH"
     configure_pm2_startup || log_warn "PM2 开机启动配置仍未完成"
@@ -2092,7 +2094,7 @@ prepare_system_tools() {
 prepare_managed_runtime() {
     require_root
     require_command realpath
-    migrate_legacy_frontend_marker || die "旧版本实例状态迁移失败"
+    repair_missing_frontend_marker || die "旧版本实例状态迁移失败"
     validate_instance_files || die "实例状态存在，但安装内容不完整"
     if [[ ! -x "$NODE_BIN" ]]; then
         command -v node >/dev/null 2>&1 || die "已安装实例记录的 Node 不可用，且系统中找不到 node"

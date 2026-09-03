@@ -375,15 +375,17 @@ if ! (
 
     load_state
     [[ "$STATE_VERSION" == 1 ]]
-    migrate_legacy_frontend_marker
+    repair_missing_frontend_marker
     manager_marker_matches "$(frontend_marker_path)"
     grep -Fxq 'STATE_VERSION=2' "$STATE_FILE"
 
     rm -f -- "$(frontend_marker_path)"
     load_state
     [[ "$STATE_VERSION" == 2 ]]
-    migrate_legacy_frontend_marker
+    repair_missing_frontend_marker
     [[ ! -e "$(frontend_marker_path)" ]]
+    repair_missing_frontend_marker 1
+    manager_marker_matches "$(frontend_marker_path)"
 ); then
     fail "legacy frontend marker migration"
 fi
@@ -429,7 +431,7 @@ if ! (
     mv -f -- "$STATE_FILE.legacy" "$STATE_FILE"
 
     load_state
-    if migrate_legacy_frontend_marker >/dev/null 2>&1; then
+    if repair_missing_frontend_marker >/dev/null 2>&1; then
         exit 1
     fi
     [[ ! -e "$(frontend_marker_path)" ]]
