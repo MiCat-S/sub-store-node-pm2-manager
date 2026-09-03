@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1090,SC2016,SC2034,SC2317,SC2329
+# shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2317,SC2329
 
 set -Eeuo pipefail
 
@@ -329,6 +329,113 @@ grep -Fq '"watch": false' "$ECOSYSTEM_FILE" || fail "PM2 watch disabled"
 grep -Fq '"cwd":' "$ECOSYSTEM_FILE" || fail "PM2 cwd missing"
 validate_instance_files || fail "complete instance files"
 if compgen -G "${STATE_FILE}.tmp.*" >/dev/null; then fail "state temp file leaked"; fi
+
+if ! (
+    trap - EXIT
+    legacy_root="$TEST_ROOT/legacy-marker-migration"
+    STATE_ROOT="$legacy_root/state"
+    STATE_FILE="$STATE_ROOT/instance.conf"
+    DEPLOY_DIR="$legacy_root/deploy"
+    BACKEND_FILE="$DEPLOY_DIR/sub-store.bundle.js"
+    FRONTEND_DIR="$legacy_root/frontend"
+    DATA_DIR="$legacy_root/data"
+    ENV_FILE="$DEPLOY_DIR/.env"
+    ECOSYSTEM_FILE="$DEPLOY_DIR/ecosystem.config.cjs"
+    MARKER_FILE="$DEPLOY_DIR/.substore-manager-instance"
+    PM2_NAME=sub-store-legacy
+    PORT=39002
+    HOST=127.0.0.1
+    BACKEND_VERSION=1.0.0
+    FRONTEND_VERSION=1.0.0
+    INSTALL_ID=legacy0123456789
+    CREATED_BY_MANAGER=1
+    DATA_CREATED_BY_MANAGER=1
+    FRONTEND_CREATED_BY_MANAGER=0
+    INSTALLED_AT=2026-08-29T00:00:00+00:00
+    AUTO_UPDATE_ENABLED=0
+    AUTO_UPDATE_INTERVAL_MINUTES=60
+    BACKUP_RETENTION_COUNT=10
+    mkdir -p "$DEPLOY_DIR" "$DATA_DIR" "$FRONTEND_DIR"
+    printf '%s\n' '// SUB_STORE_BACKEND_VERSION: 1.0.0' >"$BACKEND_FILE"
+    printf '%s\n' '<!doctype html>' >"$FRONTEND_DIR/index.html"
+    printf '%s\n' "$INSTALL_ID" >"$MARKER_FILE"
+    printf '%s\n' "$INSTALL_ID" >"$DATA_DIR/.substore-manager-data"
+    env_set "$ENV_FILE" SUB_STORE_BACKEND_API_PORT "$PORT"
+    env_set "$ENV_FILE" SUB_STORE_BACKEND_API_HOST "$HOST"
+    env_set "$ENV_FILE" SUB_STORE_DATA_BASE_PATH "$DATA_DIR"
+    env_set "$ENV_FILE" SUB_STORE_FRONTEND_PATH "$FRONTEND_DIR"
+    write_ecosystem
+    save_state
+    awk '
+        $0 == "STATE_VERSION=2" { print "STATE_VERSION=1"; next }
+        $0 ~ /^FRONTEND_CREATED_BY_MANAGER=/ { next }
+        { print }
+    ' "$STATE_FILE" >"$STATE_FILE.legacy"
+    mv -f -- "$STATE_FILE.legacy" "$STATE_FILE"
+
+    load_state
+    [[ "$STATE_VERSION" == 1 ]]
+    migrate_legacy_frontend_marker
+    manager_marker_matches "$(frontend_marker_path)"
+    grep -Fxq 'STATE_VERSION=2' "$STATE_FILE"
+
+    rm -f -- "$(frontend_marker_path)"
+    load_state
+    [[ "$STATE_VERSION" == 2 ]]
+    migrate_legacy_frontend_marker
+    [[ ! -e "$(frontend_marker_path)" ]]
+); then
+    fail "legacy frontend marker migration"
+fi
+
+if ! (
+    trap - EXIT
+    legacy_root="$TEST_ROOT/legacy-marker-env-mismatch"
+    STATE_ROOT="$legacy_root/state"
+    STATE_FILE="$STATE_ROOT/instance.conf"
+    DEPLOY_DIR="$legacy_root/deploy"
+    BACKEND_FILE="$DEPLOY_DIR/sub-store.bundle.js"
+    FRONTEND_DIR="$legacy_root/frontend"
+    DATA_DIR="$legacy_root/data"
+    ENV_FILE="$DEPLOY_DIR/.env"
+    ECOSYSTEM_FILE="$DEPLOY_DIR/ecosystem.config.cjs"
+    MARKER_FILE="$DEPLOY_DIR/.substore-manager-instance"
+    PM2_NAME=sub-store-legacy-mismatch
+    PORT=39003
+    HOST=127.0.0.1
+    BACKEND_VERSION=1.0.0
+    FRONTEND_VERSION=1.0.0
+    INSTALL_ID=legacymismatch1234
+    CREATED_BY_MANAGER=1
+    DATA_CREATED_BY_MANAGER=1
+    FRONTEND_CREATED_BY_MANAGER=0
+    INSTALLED_AT=2026-08-29T00:00:00+00:00
+    AUTO_UPDATE_ENABLED=0
+    AUTO_UPDATE_INTERVAL_MINUTES=60
+    BACKUP_RETENTION_COUNT=10
+    mkdir -p "$DEPLOY_DIR" "$DATA_DIR" "$FRONTEND_DIR" "$legacy_root/other-frontend"
+    printf '%s\n' '// SUB_STORE_BACKEND_VERSION: 1.0.0' >"$BACKEND_FILE"
+    printf '%s\n' '<!doctype html>' >"$FRONTEND_DIR/index.html"
+    printf '%s\n' "$INSTALL_ID" >"$MARKER_FILE"
+    printf '%s\n' "$INSTALL_ID" >"$DATA_DIR/.substore-manager-data"
+    env_set "$ENV_FILE" SUB_STORE_BACKEND_API_PORT "$PORT"
+    env_set "$ENV_FILE" SUB_STORE_BACKEND_API_HOST "$HOST"
+    env_set "$ENV_FILE" SUB_STORE_DATA_BASE_PATH "$DATA_DIR"
+    env_set "$ENV_FILE" SUB_STORE_FRONTEND_PATH "$legacy_root/other-frontend"
+    write_ecosystem
+    save_state
+    awk '$0 == "STATE_VERSION=2" { print "STATE_VERSION=1"; next } { print }' \
+        "$STATE_FILE" >"$STATE_FILE.legacy"
+    mv -f -- "$STATE_FILE.legacy" "$STATE_FILE"
+
+    load_state
+    if migrate_legacy_frontend_marker >/dev/null 2>&1; then
+        exit 1
+    fi
+    [[ ! -e "$(frontend_marker_path)" ]]
+); then
+    fail "legacy frontend marker migration accepted mismatched Env"
+fi
 
 state_before_failed_save="$TEST_ROOT/state-before-failed-save.conf"
 cp -p -- "$STATE_FILE" "$state_before_failed_save"

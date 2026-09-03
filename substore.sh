@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 077
 
-MANAGER_VERSION="1.2.0"
+MANAGER_VERSION="1.2.1"
 MANAGER_ID="MiCat-S/sub-store-node-pm2-manager"
 BACKEND_REPO="sub-store-org/Sub-Store"
 FRONTEND_REPO="sub-store-org/Sub-Store-Front-End"
@@ -41,6 +41,7 @@ GITHUB_API_BASE="${SUBSTORE_MANAGER_GITHUB_API_BASE:-https://api.github.com}"
 SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
 
 INSTALL_PRESENT=0
+STATE_VERSION=2
 CREATED_BY_MANAGER=""
 DATA_CREATED_BY_MANAGER=""
 FRONTEND_CREATED_BY_MANAGER=""
@@ -818,6 +819,7 @@ load_state() {
     # shellcheck source=/dev/null
     source "$STATE_FILE"
     [[ "$INSTANCE_ID" == "$requested_instance" ]] || die "状态文件实例名称不匹配：$STATE_FILE"
+    STATE_VERSION="${STATE_VERSION:-1}"
     DATA_CREATED_BY_MANAGER="${DATA_CREATED_BY_MANAGER:-0}"
     FRONTEND_CREATED_BY_MANAGER="${FRONTEND_CREATED_BY_MANAGER:-0}"
     AUTO_UPDATE_ENABLED="${AUTO_UPDATE_ENABLED:-0}"
@@ -832,13 +834,62 @@ load_state() {
     return 0
 }
 
-validate_instance_files() {
+validate_instance_core_files() {
     [[ -f "$BACKEND_FILE" && ! -L "$BACKEND_FILE" ]] || { log_error "后端文件不存在或不安全：$BACKEND_FILE"; return 1; }
     [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]] || { log_error "Env 文件不存在或不安全：$ENV_FILE"; return 1; }
     [[ -f "$ECOSYSTEM_FILE" && ! -L "$ECOSYSTEM_FILE" ]] || { log_error "PM2 配置不存在或不安全：$ECOSYSTEM_FILE"; return 1; }
     [[ -d "$DATA_DIR" && ! -L "$DATA_DIR" ]] || { log_error "数据目录不存在或不安全：$DATA_DIR"; return 1; }
     [[ -d "$FRONTEND_DIR" && ! -L "$FRONTEND_DIR" ]] || { log_error "前端目录不存在或不安全：$FRONTEND_DIR"; return 1; }
     [[ -f "$FRONTEND_DIR/index.html" ]] || { log_error "前端入口不存在：$FRONTEND_DIR/index.html"; return 1; }
+}
+
+migrate_legacy_frontend_marker() {
+    local marker state_frontend state_data env_frontend env_data value
+    marker="$(frontend_marker_path)"
+    manager_marker_matches "$marker" && return 0
+    [[ ! -e "$marker" && ! -L "$marker" ]] || return 0
+    [[ "$STATE_VERSION" == 1 ]] || return 0
+
+    validate_instance_core_files || return 1
+    if ! manager_marker_matches "${DATA_DIR}/.substore-manager-data"; then
+        log_error "旧版本实例的数据目录管理标记缺失或不匹配：$DATA_DIR"
+        return 1
+    fi
+    if ! validate_absolute_path "$DEPLOY_DIR" || \
+        ! validate_absolute_path "$DATA_DIR" || \
+        ! validate_absolute_path "$FRONTEND_DIR" || \
+        ! validate_runtime_layout || \
+        ! assert_paths_not_managed_elsewhere; then
+        log_error "旧版本实例的目录布局或跨实例占用不安全，未补写前端管理标记"
+        return 1
+    fi
+
+    state_frontend="$(normalize_path "$FRONTEND_DIR")"
+    state_data="$(normalize_path "$DATA_DIR")"
+    value="$(env_get "$ENV_FILE" SUB_STORE_FRONTEND_PATH 2>/dev/null || true)"
+    env_frontend="$(resolve_config_path "$value" "${DEPLOY_DIR}/frontend")"
+    value="$(env_get "$ENV_FILE" SUB_STORE_DATA_BASE_PATH 2>/dev/null || true)"
+    env_data="$(resolve_config_path "$value" "$DEPLOY_DIR")"
+    if [[ "$env_frontend" != "$state_frontend" || "$env_data" != "$state_data" ]]; then
+        log_error "旧版本实例的 Env 目录与状态文件不一致，未补写前端管理标记"
+        return 1
+    fi
+
+    write_frontend_marker || {
+        log_error "旧版本实例的前端管理标记补写失败：$FRONTEND_DIR"
+        return 1
+    }
+    STATE_VERSION=2
+    save_state || {
+        rm -f -- "$marker" 2>/dev/null || true
+        log_error "旧版本实例状态升级失败，已撤销前端管理标记"
+        return 1
+    }
+    log_info "已补全旧版本实例的前端管理标记：$FRONTEND_DIR"
+}
+
+validate_instance_files() {
+    validate_instance_core_files || return 1
     if ! manager_marker_matches "${DATA_DIR}/.substore-manager-data"; then
         log_error "数据目录管理标记缺失或不匹配：$DATA_DIR"
         return 1
@@ -2040,6 +2091,8 @@ prepare_system_tools() {
 
 prepare_managed_runtime() {
     require_root
+    require_command realpath
+    migrate_legacy_frontend_marker || die "旧版本实例状态迁移失败"
     validate_instance_files || die "实例状态存在，但安装内容不完整"
     if [[ ! -x "$NODE_BIN" ]]; then
         command -v node >/dev/null 2>&1 || die "已安装实例记录的 Node 不可用，且系统中找不到 node"
@@ -2052,7 +2105,6 @@ prepare_managed_runtime() {
     require_command curl
     require_command ss
     require_command flock
-    require_command realpath
 }
 
 prepare_pm2_control_runtime() {
