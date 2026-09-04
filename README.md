@@ -19,6 +19,8 @@
 
 > 💡 **第一次使用？** 准备一台 Debian/Ubuntu 服务器，复制下面的一行安装命令，然后按照中文提示操作即可。不确定的选项直接按 Enter 使用默认值。
 
+> Sub-Store `2.38.0` 起，Node.js 后端使用 CORS allowlist，并要求脚本操作具备有效的 `SUB_STORE_FRONTEND_BACKEND_PATH`。本管理器的新安装会继承官方 CORS 默认值，并继续生成随机后端路径。
+
 ## ✅ 开始前需要什么
 
 服务器需要满足：
@@ -152,11 +154,31 @@ PM2 进程名称 [sub-store]:
 /84f6c212ecc93553b9c00874efc889e362f36b58251a119c1dacbfc197cbda32
 ```
 
-它必须以 `/` 开头。Sub-Store 当前只支持一个路径前缀，不支持同时填写多个入口。
+它必须以 `/` 开头。Sub-Store `2.38.0` 起允许设置为 `/`，用于保持根路径 API；公网部署仍建议使用自动生成的随机路径。
 
 这个路径不是登录密码，公网部署仍然建议使用 HTTPS、访问控制或 VPN。
 
-### 8. 自动更新
+### 8. 浏览器 CORS allowlist
+
+```text
+允许访问后端的前端 Origin（逗号分隔；留空使用官方默认）:
+```
+
+Origin 只包含协议、域名和端口，不包含路径。例如：
+
+```text
+https://sub-store.example.com
+```
+
+使用自建网页前端时，填写浏览器地址栏中实际使用的 Origin。多个前端用英文逗号分隔。使用官方托管前端或 Stash 时可以留空，后端会采用官方默认值：
+
+```text
+https://sub-store.vercel.app,http://substore.stash,https://substore.stash
+```
+
+`*` 仍可使用，但会允许任意网页 Origin 访问后端，不建议用于公网服务。
+
+### 9. 自动更新
 
 ```text
 是否启用定时自动检查并更新前端和后端 [Y/n]:
@@ -184,6 +206,7 @@ Sub-Store 安装完成
 PM2 名称：sub-store
 后端版本：2.x.x
 前端版本：2.x.x
+CORS allowlist：官方默认（https://sub-store.vercel.app,http://substore.stash,https://substore.stash）
 本机健康检查：http://127.0.0.1:3000/随机路径/api/utils/env
 ```
 
@@ -524,6 +547,10 @@ SUB_STORE_MMDB_*
 
 涉及路径、端口、URL、代理、CORS 和 cron 的值会做基本格式检查。敏感值只显示部分内容。修改后启动失败会恢复旧 `.env`。
 
+Sub-Store `2.38.0` 起，未设置 `SUB_STORE_CORS_ALLOWED_ORIGINS` 时使用官方托管前端和 Stash 的 allowlist。自建网页前端应设置精确 Origin。管理器不会自动改写已有的 `*`，更新管理器时会提示检查。
+
+`SUB_STORE_FRONTEND_BACKEND_PATH` 可以设置为 `/`，但随机路径能减少 API 被直接探测的机会。它不代替认证、HTTPS、反向代理访问控制或 VPN。
+
 ## 📁 文件放在哪里
 
 默认目录：
@@ -618,6 +645,7 @@ sudo env \
   SUBSTORE_PM2_NAME=sub-store \
   SUBSTORE_HOST=127.0.0.1 \
   SUBSTORE_MAGIC_PATH=/my-private-path \
+  SUBSTORE_CORS_ALLOWED_ORIGINS=https://sub-store.example.com \
   SUBSTORE_AUTO_UPDATE=1 \
   SUBSTORE_AUTO_UPDATE_MINUTES=60 \
   /tmp/substore.sh install
@@ -667,6 +695,22 @@ sudo install -m 755 /tmp/substore.sh /usr/local/sbin/substore
 ```
 
 新版会尝试从 PM2 当前进程恢复 `SUB_STORE_FRONTEND_BACKEND_PATH`。仍然找不到时，请输入当前使用且以 `/` 开头的后端路径。
+
+### 网页请求提示 CORS origin not allowed
+
+运行：
+
+```bash
+sudo substore env
+```
+
+选择修改 `SUB_STORE_CORS_ALLOWED_ORIGINS`，填写网页前端的精确 Origin，例如：
+
+```text
+https://sub-store.example.com
+```
+
+不要填写路径。修改后管理器会重启实例并执行健康检查，失败时恢复原 Env。
 
 ### 修改 `.env` 后没有生效
 

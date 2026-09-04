@@ -3,12 +3,13 @@
 set -Eeuo pipefail
 umask 077
 
-MANAGER_VERSION="1.2.2"
+MANAGER_VERSION="1.3.0"
 MANAGER_ID="MiCat-S/sub-store-node-pm2-manager"
 BACKEND_REPO="sub-store-org/Sub-Store"
 FRONTEND_REPO="sub-store-org/Sub-Store-Front-End"
 BACKEND_ASSET="sub-store.bundle.js"
 FRONTEND_ASSET="dist.zip"
+OFFICIAL_CORS_DEFAULT="https://sub-store.vercel.app,http://substore.stash,https://substore.stash"
 INSTANCE_ID="${SUBSTORE_INSTANCE:-default}"
 if [[ "${1:-}" == --instance || "${1:-}" == -i ]]; then
     [[ -n "${2:-}" ]] || { printf '缺少实例名称\n' >&2; exit 2; }
@@ -506,7 +507,7 @@ init_env_catalog() {
     ENV_DEFAULT[SUB_STORE_FRONTEND_HOST]="__UNSET__"
     ENV_DEFAULT[SUB_STORE_MAX_HEADER_SIZE]="32768"
     ENV_DEFAULT[SUB_STORE_BODY_JSON_LIMIT]="1mb"
-    ENV_DEFAULT[SUB_STORE_CORS_ALLOWED_ORIGINS]="*"
+    ENV_DEFAULT[SUB_STORE_CORS_ALLOWED_ORIGINS]="$OFFICIAL_CORS_DEFAULT"
     ENV_DEFAULT[SUB_STORE_BACKEND_DEFAULT_PROXY]="__UNSET__"
     ENV_DEFAULT[SUB_STORE_PUSH_SERVICE]="__UNSET__"
     ENV_DEFAULT[SUB_STORE_BACKEND_SYNC_CRON]="__UNSET__"
@@ -1358,6 +1359,14 @@ configure_auto_update_after_install() {
     fi
 }
 
+warn_insecure_cors_wildcard() {
+    local cors_allowed_origins
+    cors_allowed_origins="$(env_get "$ENV_FILE" SUB_STORE_CORS_ALLOWED_ORIGINS 2>/dev/null || true)"
+    [[ "$cors_allowed_origins" == "*" ]] || return 0
+    log_warn "当前 SUB_STORE_CORS_ALLOWED_ORIGINS=*，浏览器跨域访问不受 Origin 限制"
+    log_warn "建议运行 substore env，将其改为自建前端的精确 Origin；已有配置未被自动修改"
+}
+
 repair_managed_installation() {
     require_command flock
     require_command realpath
@@ -1366,6 +1375,7 @@ repair_managed_installation() {
     load_state || { release_update_lock; release_manager_lock; die "实例状态不存在"; }
     repair_missing_frontend_marker 1 || die "实例前端管理标记修复失败"
     prepare_managed_runtime
+    warn_insecure_cors_wildcard
     install_manager_command || log_warn "管理命令更新失败：$MANAGER_INSTALL_PATH"
     configure_pm2_startup || log_warn "PM2 开机启动配置仍未完成"
     if [[ "$AUTO_UPDATE_ENABLED" == 1 ]]; then
@@ -1965,21 +1975,21 @@ NODE
 }
 
 write_initial_env() {
-    local magic_path="$1" node_bin
+    local magic_path="$1" cors_allowed_origins="${2:-}" node_bin
     [[ ! -L "$ENV_FILE" ]] || return 1
     node_bin="$(node_command)"
-    if ! "$node_bin" - "$ENV_FILE" "$PORT" "$HOST" "$magic_path" "$FRONTEND_DIR" "$DATA_DIR" <<'NODE'
+    if ! "$node_bin" - "$ENV_FILE" "$PORT" "$HOST" "$magic_path" "$FRONTEND_DIR" "$DATA_DIR" "$cors_allowed_origins" <<'NODE'
 const fs = require('fs');
-const [file, port, host, magicPath, frontendDir, dataDir] = process.argv.slice(2);
+const [file, port, host, magicPath, frontendDir, dataDir, corsAllowedOrigins] = process.argv.slice(2);
 const values = {
   SUB_STORE_BACKEND_API_PORT: port,
   SUB_STORE_BACKEND_API_HOST: host,
   SUB_STORE_BACKEND_MERGE: 'true',
   SUB_STORE_FRONTEND_BACKEND_PATH: magicPath,
   SUB_STORE_FRONTEND_PATH: frontendDir,
-  SUB_STORE_DATA_BASE_PATH: dataDir,
-  SUB_STORE_CORS_ALLOWED_ORIGINS: '*'
+  SUB_STORE_DATA_BASE_PATH: dataDir
 };
+if (corsAllowedOrigins) values.SUB_STORE_CORS_ALLOWED_ORIGINS = corsAllowedOrigins;
 const temp = `${file}.tmp.${process.pid}`;
 try {
   const source = Object.entries(values)
@@ -2151,7 +2161,7 @@ install_manager_command() {
 }
 
 new_install() {
-    local default_deploy default_pm2 default_data default_frontend default_magic_path magic_path stage stage_parent backend_stage frontend_zip frontend_stage existing_pm2_status port_status
+    local default_deploy default_pm2 default_data default_frontend default_magic_path magic_path cors_allowed_origins stage stage_parent backend_stage frontend_zip frontend_stage existing_pm2_status port_status
     if [[ "$INSTANCE_ID" == default ]]; then
         default_deploy="${SUBSTORE_INSTALL_DIR:-/opt/sub-store}"
         default_pm2="${SUBSTORE_PM2_NAME:-sub-store}"
@@ -2171,6 +2181,7 @@ new_install() {
         DATA_DIR="${SUBSTORE_DATA_DIR:-${DEPLOY_DIR}/data}"
         FRONTEND_DIR="${SUBSTORE_FRONTEND_DIR:-${DEPLOY_DIR}/frontend}"
         magic_path="${SUBSTORE_MAGIC_PATH:-$default_magic_path}"
+        cors_allowed_origins="${SUBSTORE_CORS_ALLOWED_ORIGINS:-}"
     else
         DEPLOY_DIR="$(prompt '部署目录' "$default_deploy")"
         PORT="$(prompt '监听端口' "${SUBSTORE_PORT:-3000}")"
@@ -2181,6 +2192,7 @@ new_install() {
         default_frontend="${DEPLOY_DIR}/frontend"
         FRONTEND_DIR="$(prompt '前端文件目录（更新后的 dist 解压位置）' "${SUBSTORE_FRONTEND_DIR:-$default_frontend}")"
         magic_path="$(prompt '后端路径前缀（SUB_STORE_FRONTEND_BACKEND_PATH）' "$default_magic_path")"
+        cors_allowed_origins="$(prompt '允许访问后端的前端 Origin（逗号分隔；留空使用官方默认）' "${SUBSTORE_CORS_ALLOWED_ORIGINS:-}")"
     fi
 
     validate_absolute_path "$DEPLOY_DIR" || die "部署目录必须是安全的绝对路径"
@@ -2190,6 +2202,9 @@ new_install() {
     validate_env_value SUB_STORE_BACKEND_API_HOST "$HOST" || die "监听地址无效：$HOST"
     validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH "$magic_path" || \
         die "后端路径前缀必须以 / 开头"
+    [[ -z "$cors_allowed_origins" ]] || \
+        validate_env_value SUB_STORE_CORS_ALLOWED_ORIGINS "$cors_allowed_origins" || \
+        die "CORS allowlist 必须是 * 或逗号分隔的 http/https Origin，不能包含路径"
     validate_pm2_name "$PM2_NAME" || die "PM2 名称只能包含字母、数字、点、下划线和连字符"
 
     prepare_system_tools
@@ -2274,7 +2289,7 @@ new_install() {
     write_frontend_marker
     cp -a "$frontend_stage"/. "$FRONTEND_DIR"/
     [[ -f "$FRONTEND_DIR/index.html" ]] || die "前端文件写入失败"
-    write_initial_env "$magic_path"
+    write_initial_env "$magic_path" "$cors_allowed_origins"
     write_ecosystem
 
     BACKEND_VERSION="$BACKEND_LATEST"
@@ -2302,6 +2317,11 @@ new_install() {
     printf 'PM2 名称：%s\n' "$PM2_NAME"
     printf '后端版本：%s\n' "$BACKEND_VERSION"
     printf '前端版本：%s\n' "$FRONTEND_VERSION"
+    if [[ -z "$cors_allowed_origins" ]]; then
+        printf 'CORS allowlist：官方默认（%s）\n' "$OFFICIAL_CORS_DEFAULT"
+    else
+        printf 'CORS allowlist：%s\n' "$cors_allowed_origins"
+    fi
     printf '本机健康检查：http://%s:%s%s\n' "$(health_host)" "$PORT" "$(health_path)"
 }
 
@@ -2466,6 +2486,7 @@ import_existing() {
     MARKER_FILE="${DEPLOY_DIR}/.substore-manager-instance"
     validate_env_value SUB_STORE_BACKEND_API_PORT "$PORT" || die "现有部署端口无效：$PORT"
     validate_env_value SUB_STORE_BACKEND_API_HOST "$HOST" || die "现有部署监听地址无效：$HOST"
+    validate_env_consistency || die "现有部署 Env 不满足 Sub-Store Node.js 要求"
     validate_runtime_layout || die "现有部署的目录布局不适合安全管理"
     assert_paths_not_managed_elsewhere || die "现有部署路径与其他管理实例冲突"
     assert_identity_not_managed_elsewhere
@@ -2519,6 +2540,7 @@ import_existing() {
         *) die "PM2 状态不适合导入：$existing_status" ;;
     esac
     validate_import_pm2_compatibility || die "请先把 PM2 中的 Sub-Store Env/参数迁移到 .env"
+    validate_env_consistency || die "导入确认后 Env 不再满足 Sub-Store Node.js 要求"
     if [[ "$existing_status" == online ]]; then
         if [[ "$BACKEND_VERSION" == unknown ]]; then
             wait_for_health "" || die "现有 PM2 实例未通过健康检查，已取消导入"
@@ -2960,6 +2982,7 @@ update_instance() {
     load_state || die "实例状态在等待更新锁期间发生变化"
     prepare_managed_runtime
     sync_state_from_env || die "Env 与管理状态不一致，已拒绝更新"
+    validate_env_consistency || die "Env 不满足 Sub-Store 2.38.0+ 的 Node.js 要求，已拒绝更新"
     original_status="$(pm2_process_status)" || die "无法读取更新前 PM2 状态"
     case "$original_status" in
         online|stopped) ;;
@@ -3211,16 +3234,25 @@ rollback_env_transaction() {
 }
 
 validate_env_consistency() {
-    local merge backend_prefix magic frontend
+    local merge backend_prefix magic frontend custom_name
     merge="$(env_get "$ENV_FILE" SUB_STORE_BACKEND_MERGE 2>/dev/null || true)"
     backend_prefix="$(env_get "$ENV_FILE" SUB_STORE_BACKEND_PREFIX 2>/dev/null || true)"
     magic="$(env_get "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH 2>/dev/null || true)"
     frontend="$(env_get "$ENV_FILE" SUB_STORE_FRONTEND_PATH 2>/dev/null || true)"
-    if [[ -n "$merge" || -n "$backend_prefix" ]]; then
-        validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH "$magic" || {
+    custom_name="$(env_get "$ENV_FILE" SUB_STORE_BACKEND_CUSTOM_NAME 2>/dev/null || true)"
+    if [[ -n "$magic" ]] && ! validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH "$magic"; then
+        log_error "SUB_STORE_FRONTEND_BACKEND_PATH 必须以 / 开头"
+        return 1
+    fi
+    if [[ -z "$magic" ]]; then
+        if [[ -n "$merge" || -n "$backend_prefix" ]]; then
             log_error "启用 BACKEND_MERGE 或 BACKEND_PREFIX 时，必须设置有效的 SUB_STORE_FRONTEND_BACKEND_PATH"
             return 1
-        }
+        fi
+        if [[ -z "$custom_name" ]]; then
+            log_error "Sub-Store 2.38.0+ 的 Node.js 脚本操作要求设置 SUB_STORE_FRONTEND_BACKEND_PATH；保持根路径可设置为 /"
+            return 1
+        fi
     fi
     if [[ -n "$merge" && ( -z "$frontend" || ! -f "$frontend/index.html" ) ]]; then
         log_error "启用 BACKEND_MERGE 时，SUB_STORE_FRONTEND_PATH 必须包含 index.html"

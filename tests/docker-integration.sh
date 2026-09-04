@@ -120,7 +120,21 @@ test -f /var/lib/substore-test/root.json
 grep -Fq 'SUB_STORE_BACKEND_API_PORT="39031"' /opt/substore-test/.env
 grep -Fq 'SUB_STORE_FRONTEND_BACKEND_PATH="/integration-path"' /opt/substore-test/.env
 grep -Fq 'SUB_STORE_FRONTEND_PATH="/srv/substore-frontend"' /opt/substore-test/.env
+if grep -q '^SUB_STORE_CORS_ALLOWED_ORIGINS=' /opt/substore-test/.env; then
+    fail 'new install persisted a CORS wildcard instead of using the official default'
+fi
 test "$(pm2_status sub-store-integration)" = online
+
+cors_headers=/tmp/substore-cors-headers
+curl --fail --silent --show-error \
+    --dump-header "$cors_headers" \
+    --output /dev/null \
+    --header 'Origin: https://sub-store.vercel.app' \
+    http://127.0.0.1:39031/integration-path/api/utils/env
+tr -d '\r' <"$cors_headers" | grep -Fqi 'Access-Control-Allow-Origin: https://sub-store.vercel.app'
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --header 'Origin: https://untrusted.example' \
+    http://127.0.0.1:39031/integration-path/api/utils/env)" = 403
 
 mkdir -p /tmp/substore-no-network
 cat >/tmp/substore-no-network/curl <<'EOF'

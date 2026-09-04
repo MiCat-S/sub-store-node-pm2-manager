@@ -47,6 +47,13 @@ source "$SCRIPT"
 trap test_cleanup EXIT
 init_env_catalog
 NODE_BIN="$(command -v node)"
+assert_eq \
+    'https://sub-store.vercel.app,http://substore.stash,https://substore.stash' \
+    "$OFFICIAL_CORS_DEFAULT" \
+    "official CORS default"
+assert_eq "$OFFICIAL_CORS_DEFAULT" \
+    "${ENV_DEFAULT[SUB_STORE_CORS_ALLOWED_ORIGINS]}" \
+    "manager CORS default"
 
 ENV_FILE="$TEST_ROOT/.env"
 env_set "$ENV_FILE" SUB_STORE_BACKEND_API_PORT 3000
@@ -62,6 +69,7 @@ validate_env_value SUB_STORE_BACKEND_API_PORT 65535 || fail "valid port"
 if validate_env_value SUB_STORE_BACKEND_API_PORT 65536; then fail "invalid port"; fi
 validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH /abc-123 || fail "valid prefix"
 validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH /api/sub-store/ || fail "valid nested prefix"
+validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH / || fail "valid root prefix"
 if validate_env_value SUB_STORE_FRONTEND_BACKEND_PATH abc; then fail "invalid prefix"; fi
 validate_env_value SUB_STORE_BODY_JSON_LIMIT 10mb || fail "valid body limit"
 validate_env_value SUB_STORE_CORS_ALLOWED_ORIGINS 'https://a.example,http://127.0.0.1:3000' || fail "valid cors"
@@ -73,6 +81,34 @@ env_set "$ENV_FILE" SUB_STORE_BACKEND_MERGE true
 env_set "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH /api/sub-store/
 env_set "$ENV_FILE" SUB_STORE_FRONTEND_PATH "$TEST_ROOT/frontend"
 validate_env_consistency || fail "merged frontend with nested prefix"
+env_set "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH /
+validate_env_consistency || fail "merged frontend with root prefix"
+env_delete "$ENV_FILE" SUB_STORE_BACKEND_MERGE
+env_delete "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH
+if validate_env_consistency >/dev/null 2>&1; then fail "Node Env without backend path accepted"; fi
+env_set "$ENV_FILE" SUB_STORE_BACKEND_CUSTOM_NAME custom
+validate_env_consistency || fail "custom backend name did not allow an unset backend path"
+env_delete "$ENV_FILE" SUB_STORE_BACKEND_CUSTOM_NAME
+env_set "$ENV_FILE" SUB_STORE_BACKEND_MERGE true
+env_set "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH /api/sub-store/
+
+if ! (
+    trap - EXIT
+    ENV_FILE="$TEST_ROOT/initial-env"
+    PORT=3000
+    HOST=127.0.0.1
+    FRONTEND_DIR="$TEST_ROOT/frontend"
+    DATA_DIR="$TEST_ROOT/initial-data"
+    write_initial_env /
+    [[ "$(env_get "$ENV_FILE" SUB_STORE_FRONTEND_BACKEND_PATH)" == / ]]
+    if env_get "$ENV_FILE" SUB_STORE_CORS_ALLOWED_ORIGINS >/dev/null 2>&1; then
+        exit 1
+    fi
+    write_initial_env / https://sub-store.example.com
+    [[ "$(env_get "$ENV_FILE" SUB_STORE_CORS_ALLOWED_ORIGINS)" == https://sub-store.example.com ]]
+); then
+    fail "initial Env CORS policy"
+fi
 
 mkdir -p "$TEST_ROOT/bin"
 cat >"$TEST_ROOT/bin/pm2" <<'EOF'

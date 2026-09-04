@@ -47,4 +47,17 @@ if ! diff -u "$TMP_ROOT/source-env.txt" "$TMP_ROOT/manager-env.txt"; then
     exit 1
 fi
 
+node - "$backend_dir/backend/src/utils/cors.js" "$ROOT/substore.sh" <<'NODE'
+const fs = require('fs');
+const [corsFile, managerFile] = process.argv.slice(2);
+const corsSource = fs.readFileSync(corsFile, 'utf8');
+const managerSource = fs.readFileSync(managerFile, 'utf8');
+const upstream = corsSource.match(/NON_NODE_CORS_DEFAULT\s*=\s*['"]([^'"]+)['"]/s)?.[1];
+const manager = managerSource.match(/^OFFICIAL_CORS_DEFAULT="([^"]+)"$/m)?.[1];
+if (!upstream || !manager || upstream !== manager) {
+  console.error(`Official CORS default drift detected. upstream=${upstream || '<missing>'} manager=${manager || '<missing>'}`);
+  process.exit(1);
+}
+NODE
+
 printf 'PASS: manager Env catalog matches current official backend/frontend source\n'
