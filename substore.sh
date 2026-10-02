@@ -3199,6 +3199,34 @@ select_official_env() {
     SELECTED_ENV="${OFFICIAL_ENV_ORDER[$((index - 1))]}"
 }
 
+# 重启并做健康检查；失败时回滚 Env 事务并尝试用旧配置恢复。返回 1：已回滚；2：回滚本身失败
+restart_or_rollback_env() {
+    local expected_version="$1" failure_message="$2" recovery_message="$3"
+    restart_instance 0 && wait_for_health "$expected_version" && return 0
+    log_warn "$failure_message"
+    if ! rollback_env_transaction 1; then
+        release_update_lock
+        release_manager_lock
+        return 2
+    fi
+    if ! restart_instance 0 || ! wait_for_health "$expected_version"; then
+        log_error "$recovery_message"
+    fi
+    release_update_lock
+    release_manager_lock
+    return 1
+}
+
+# 在 Env 事务内执行修改命令并校验一致性；失败时统一回滚，成功后按需重启
+run_env_transaction() {
+    begin_env_transaction || { log_error "无法创建 Env 事务备份"; return; }
+    if ! "$@" || ! validate_env_consistency; then
+        rollback_env_transaction || log_error "恢复 Env 事务失败"
+        return
+    fi
+    restart_after_env_change
+}
+
 restart_after_env_change() {
     local original_status
     if ! sync_state_from_env; then
@@ -3216,20 +3244,9 @@ restart_after_env_change() {
                 rollback_env_transaction || log_error "恢复 Env 事务失败"
                 return 1
             fi
-            if ! restart_instance 0 || ! wait_for_health "$(backend_version_from_file "$BACKEND_FILE" || true)"; then
-                log_warn "新 Env 健康检查失败，正在恢复修改前配置"
-                if ! rollback_env_transaction 1; then
-                    release_update_lock
-                    release_manager_lock
-                    return 1
-                fi
-                if ! restart_instance 0 || ! wait_for_health "$(backend_version_from_file "$BACKEND_FILE" || true)"; then
-                    log_error "恢复旧 Env 后仍未通过健康检查，请查看 PM2 日志"
-                fi
-                release_update_lock
-                release_manager_lock
-                return 1
-            fi
+            restart_or_rollback_env "$(backend_version_from_file "$BACKEND_FILE" || true)" \
+                "新 Env 健康检查失败，正在恢复修改前配置" \
+                "恢复旧 Env 后仍未通过健康检查，请查看 PM2 日志" || return 1
             ;;
         stopped)
             log_info "PM2 进程处于停止状态；Env 已保存，将在下次启动时生效"
@@ -3244,7 +3261,7 @@ restart_after_env_change() {
 }
 
 modify_official_env() {
-    local key current value old_data candidate marker target_existed=0
+    local key current value
     select_official_env || { log_warn "无效编号"; return; }
     key="$SELECTED_ENV"
     current="$(env_get "$ENV_FILE" "$key" 2>/dev/null || true)"
@@ -3264,16 +3281,19 @@ modify_official_env() {
         return
     fi
 
-    begin_env_transaction || { log_error "无法创建 Env 事务备份"; return; }
+    run_env_transaction stage_official_env_change "$key" "$value"
+}
 
-    if [[ "$key" == SUB_STORE_FRONTEND_PATH ]] && ! ensure_backend_path_for_merge; then
-        rollback_env_transaction || log_error "恢复 Env 事务失败"
-        return
+# 在 Env 事务内准备目录与管理标记并写入一个官方 Env；失败时由 run_env_transaction 统一回滚
+stage_official_env_change() {
+    local key="$1" value="$2" old_data candidate marker target_existed=0
+    if [[ "$key" == SUB_STORE_FRONTEND_PATH ]]; then
+        ensure_backend_path_for_merge || return 1
     fi
 
     if [[ "$key" == SUB_STORE_DATA_BASE_PATH && "$value" != "$DATA_DIR" ]]; then
         old_data="$DATA_DIR"
-        candidate="$(normalize_path "$value")"
+        candidate="$(normalize_path "$value")" || return 1
         [[ -e "$candidate" ]] && target_existed=1 || target_existed=0
         if (( target_existed )); then
             DATA_CREATED_BY_MANAGER=0
@@ -3284,56 +3304,46 @@ modify_official_env() {
         DATA_DIR="$candidate"
         if ! validate_runtime_layout || ! assert_paths_not_managed_elsewhere; then
             log_error "新的数据目录布局不安全或与其他实例冲突"
-            rollback_env_transaction || log_error "恢复 Env 事务失败"
-            return
+            return 1
         fi
         marker="${DATA_DIR}/.substore-manager-data"
         if [[ -e "$marker" || -L "$marker" ]] && ! manager_marker_matches "$marker"; then
             log_error "新的数据目录已有其他管理标记：$DATA_DIR"
-            rollback_env_transaction || log_error "恢复 Env 事务失败"
-            return
+            return 1
         fi
-        mkdir -p -- "$DATA_DIR" || { rollback_env_transaction; return; }
-        (( target_existed )) || chmod 700 "$DATA_DIR" || { rollback_env_transaction; return; }
+        mkdir -p -- "$DATA_DIR" || return 1
+        (( target_existed )) || chmod 700 "$DATA_DIR" || return 1
         if [[ -d "$old_data" ]]; then
             if (( target_existed )) && find "$DATA_DIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
                 log_warn "目标数据目录非空，为避免覆盖现有文件，不执行自动复制：$DATA_DIR"
             elif confirm "是否复制现有数据到新目录 $value" Y; then
-                cp -a "$old_data"/. "$DATA_DIR"/ || { rollback_env_transaction; return; }
+                cp -a "$old_data"/. "$DATA_DIR"/ || return 1
             fi
         fi
-        write_manager_marker "$marker" || { rollback_env_transaction; return; }
+        write_manager_marker "$marker" || return 1
         value="$DATA_DIR"
     fi
     if [[ "$key" == SUB_STORE_FRONTEND_PATH ]]; then
-        candidate="$(normalize_path "$value")"
+        candidate="$(normalize_path "$value")" || return 1
         if [[ ! -f "$candidate/index.html" ]]; then
             log_error "该目录没有 index.html：$candidate"
-            rollback_env_transaction || log_error "恢复 Env 事务失败"
-            return
+            return 1
         fi
         FRONTEND_DIR="$candidate"
         FRONTEND_CREATED_BY_MANAGER=0
         if ! validate_runtime_layout || ! assert_paths_not_managed_elsewhere; then
             log_error "新的前端目录布局不安全或与其他实例冲突"
-            rollback_env_transaction || log_error "恢复 Env 事务失败"
-            return
+            return 1
         fi
         marker="$(frontend_marker_path)"
         if [[ -e "$marker" || -L "$marker" ]] && ! manager_marker_matches "$marker"; then
             log_error "新的前端目录已有其他管理标记：$FRONTEND_DIR"
-            rollback_env_transaction || log_error "恢复 Env 事务失败"
-            return
+            return 1
         fi
-        write_manager_marker "$(frontend_marker_path)" || { rollback_env_transaction; return; }
+        write_manager_marker "$marker" || return 1
         value="$FRONTEND_DIR"
     fi
-    env_set "$ENV_FILE" "$key" "$value" || { rollback_env_transaction; return; }
-    if ! validate_env_consistency; then
-        rollback_env_transaction || log_error "恢复 Env 事务失败"
-        return
-    fi
-    restart_after_env_change
+    env_set "$ENV_FILE" "$key" "$value"
 }
 
 add_custom_env() {
@@ -3374,13 +3384,7 @@ delete_env_interactive() {
     if [[ "$key" =~ ^SUB_STORE_(BACKEND_API_PORT|DATA_BASE_PATH|FRONTEND_PATH|BACKEND_MERGE|FRONTEND_BACKEND_PATH)$ ]]; then
         confirm "删除 $key 会改变当前部署结构，确认继续" N || return
     fi
-    begin_env_transaction || { log_error "无法创建 Env 事务备份"; return; }
-    env_delete "$ENV_FILE" "$key" || { rollback_env_transaction; return; }
-    if ! validate_env_consistency; then
-        rollback_env_transaction || log_error "恢复 Env 事务失败"
-        return
-    fi
-    restart_after_env_change
+    run_env_transaction env_delete "$ENV_FILE" "$key"
 }
 
 reset_official_env() {
@@ -3398,17 +3402,11 @@ reset_official_env() {
         change_port 3000
         return
     fi
-    begin_env_transaction || { log_error "无法创建 Env 事务备份"; return; }
     if [[ "$default" == __UNSET__ ]]; then
-        env_delete "$ENV_FILE" "$key" || { rollback_env_transaction; return; }
+        run_env_transaction env_delete "$ENV_FILE" "$key"
     else
-        env_set "$ENV_FILE" "$key" "$default" || { rollback_env_transaction; return; }
+        run_env_transaction env_set "$ENV_FILE" "$key" "$default"
     fi
-    if ! validate_env_consistency; then
-        rollback_env_transaction || log_error "恢复 Env 事务失败"
-        return
-    fi
-    restart_after_env_change
 }
 
 env_menu() {
@@ -3433,7 +3431,7 @@ env_menu() {
 }
 
 change_port() {
-    local new_port old_port original_status port_status
+    local new_port old_port original_status port_status restart_status=0
     load_state || die "尚未安装或导入 Sub-Store"
     new_port="${1:-$(prompt '新监听端口' "$PORT")}"
     validate_env_value SUB_STORE_BACKEND_API_PORT "$new_port" || die "端口无效：$new_port"
@@ -3464,20 +3462,11 @@ change_port() {
         die "写入新端口失败"
     }
     save_state || { rollback_env_transaction; die "保存新端口状态失败"; }
-    if [[ "$original_status" == online ]] && \
-        { ! restart_instance 0 || ! wait_for_health "$BACKEND_VERSION"; }; then
-        log_warn "新端口启动失败，恢复 $old_port"
-        if ! rollback_env_transaction 1; then
-            release_update_lock
-            release_manager_lock
-            die "恢复旧端口配置失败"
-        fi
-        if ! restart_instance 0 || ! wait_for_health "$BACKEND_VERSION"; then
-            log_error "旧端口配置已恢复，但服务未能重新上线"
-        fi
-        release_update_lock
-        release_manager_lock
-        return 1
+    if [[ "$original_status" == online ]]; then
+        restart_or_rollback_env "$BACKEND_VERSION" "新端口启动失败，恢复 $old_port" \
+            "旧端口配置已恢复，但服务未能重新上线" || restart_status=$?
+        (( restart_status != 2 )) || die "恢复旧端口配置失败"
+        (( restart_status == 0 )) || return 1
     fi
     commit_env_transaction
     log_info "监听端口已修改为 $PORT"
