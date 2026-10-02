@@ -63,10 +63,9 @@ NODE_BIN=""
 AUTO_UPDATE_ENABLED=0
 AUTO_UPDATE_INTERVAL_MINUTES=60
 BACKUP_RETENTION_COUNT=10
-UPDATE_LOCK_HELD=0
-UPDATE_LOCK_DEPTH=0
-MANAGER_LOCK_HELD=0
-MANAGER_LOCK_DEPTH=0
+# 锁状态由 lock_acquire / lock_release 通过 nameref 读写
+# shellcheck disable=SC2034
+UPDATE_LOCK_HELD=0 UPDATE_LOCK_DEPTH=0 MANAGER_LOCK_HELD=0 MANAGER_LOCK_DEPTH=0
 INSTALL_TRANSACTION_ACTIVE=0
 IMPORT_TRANSACTION_ACTIVE=0
 UPDATE_TRANSACTION_ACTIVE=0
@@ -1398,92 +1397,73 @@ auto_update_menu() {
     done
 }
 
-acquire_update_lock() {
-    if [[ "$UPDATE_LOCK_HELD" == 1 ]]; then
-        ((UPDATE_LOCK_DEPTH += 1))
+lock_open() {
+    case "$1" in
+        UPDATE) exec 9>"$INSTANCE_LOCK_FILE" ;;
+        MANAGER) exec 8>"$MANAGER_LOCK_FILE" ;;
+    esac
+}
+
+lock_close() {
+    case "$1" in
+        UPDATE) exec 9>&- ;;
+        MANAGER) exec 8>&- ;;
+    esac
+}
+
+# 可重入锁：UPDATE 为单实例锁（fd 9），MANAGER 为跨实例全局锁（fd 8）
+lock_acquire() {
+    local name="$1" mode="$2" fd=9 wait_message="等待正在执行的更新任务结束"
+    local timeout_message="等待更新任务结束超时，已取消当前操作"
+    local -n lock_held="${name}_LOCK_HELD" lock_depth="${name}_LOCK_DEPTH"
+    if [[ "$lock_held" == 1 ]]; then
+        ((lock_depth += 1))
         return 0
+    fi
+    if [[ "$name" == MANAGER ]]; then
+        fd=8
+        wait_message="等待其他实例的管理操作结束"
+        timeout_message="等待全局管理锁超时，已取消当前操作"
     fi
     mkdir -p -- "$LOCK_DIR"
     chmod 700 "$LOCK_DIR"
-    exec 9>"$INSTANCE_LOCK_FILE"
-    if ! flock -n 9; then
-        log_warn "另一个更新任务正在运行，本次检查跳过"
-        exec 9>&-
-        return 1
-    fi
-    UPDATE_LOCK_HELD=1
-    UPDATE_LOCK_DEPTH=1
-}
-
-acquire_update_lock_wait() {
-    if [[ "$UPDATE_LOCK_HELD" == 1 ]]; then
-        ((UPDATE_LOCK_DEPTH += 1))
-        return 0
-    fi
-    mkdir -p -- "$LOCK_DIR"
-    chmod 700 "$LOCK_DIR"
-    exec 9>"$INSTANCE_LOCK_FILE"
-    if flock -n 9; then
-        UPDATE_LOCK_HELD=1
-        UPDATE_LOCK_DEPTH=1
-        return 0
-    fi
-    log_info "等待正在执行的更新任务结束"
-    if ! flock -w 1800 9; then
-        exec 9>&-
-        die "等待更新任务结束超时，已取消当前操作"
-    fi
-    UPDATE_LOCK_HELD=1
-    UPDATE_LOCK_DEPTH=1
-}
-
-release_update_lock() {
-    if [[ "$UPDATE_LOCK_HELD" == 1 ]]; then
-        if (( UPDATE_LOCK_DEPTH > 1 )); then
-            ((UPDATE_LOCK_DEPTH -= 1))
-            return 0
+    lock_open "$name"
+    if ! flock -n "$fd"; then
+        if [[ "$mode" == try ]]; then
+            log_warn "另一个更新任务正在运行，本次检查跳过"
+            lock_close "$name"
+            return 1
         fi
-        flock -u 9 || true
-        exec 9>&-
-        UPDATE_LOCK_HELD=0
-        UPDATE_LOCK_DEPTH=0
-    fi
-}
-
-acquire_manager_lock_wait() {
-    if [[ "$MANAGER_LOCK_HELD" == 1 ]]; then
-        ((MANAGER_LOCK_DEPTH += 1))
-        return 0
-    fi
-    mkdir -p -- "$LOCK_DIR"
-    chmod 700 "$LOCK_DIR"
-    exec 8>"$MANAGER_LOCK_FILE"
-    if flock -n 8; then
-        MANAGER_LOCK_HELD=1
-        MANAGER_LOCK_DEPTH=1
-        return 0
-    fi
-    log_info "等待其他实例的管理操作结束"
-    if ! flock -w 1800 8; then
-        exec 8>&-
-        die "等待全局管理锁超时，已取消当前操作"
-    fi
-    MANAGER_LOCK_HELD=1
-    MANAGER_LOCK_DEPTH=1
-}
-
-release_manager_lock() {
-    if [[ "$MANAGER_LOCK_HELD" == 1 ]]; then
-        if (( MANAGER_LOCK_DEPTH > 1 )); then
-            ((MANAGER_LOCK_DEPTH -= 1))
-            return 0
+        log_info "$wait_message"
+        if ! flock -w 1800 "$fd"; then
+            lock_close "$name"
+            die "$timeout_message"
         fi
-        flock -u 8 || true
-        exec 8>&-
-        MANAGER_LOCK_HELD=0
-        MANAGER_LOCK_DEPTH=0
     fi
+    lock_held=1
+    lock_depth=1
 }
+
+lock_release() {
+    local name="$1" fd=9
+    local -n lock_held="${name}_LOCK_HELD" lock_depth="${name}_LOCK_DEPTH"
+    [[ "$lock_held" == 1 ]] || return 0
+    if (( lock_depth > 1 )); then
+        ((lock_depth -= 1))
+        return 0
+    fi
+    [[ "$name" == UPDATE ]] || fd=8
+    flock -u "$fd" || true
+    lock_close "$name"
+    lock_held=0
+    lock_depth=0
+}
+
+acquire_update_lock() { lock_acquire UPDATE try; }
+acquire_update_lock_wait() { lock_acquire UPDATE wait; }
+release_update_lock() { lock_release UPDATE; }
+acquire_manager_lock_wait() { lock_acquire MANAGER wait; }
+release_manager_lock() { lock_release MANAGER; }
 
 release_info() {
     local repo="$1" asset="$2" json_file parsed_file node_bin
