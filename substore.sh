@@ -224,15 +224,16 @@ register_tmp() {
 }
 
 cleanup_tmp_path() {
-    local target="$1"
-    if [[ -n "$target" && -e "$target" ]]; then
-        if ! rm -rf -- "$target"; then
+    local target result=0
+    for target in "$@"; do
+        if [[ -n "$target" && -e "$target" ]] && ! rm -rf -- "$target"; then
             log_warn "临时路径清理失败：$target"
-            return 1
+            result=1
+            continue
         fi
-    fi
-    unregister_tmp_path "$target"
-    return 0
+        unregister_tmp_path "$target"
+    done
+    return "$result"
 }
 
 unregister_tmp_path() {
@@ -1045,10 +1046,7 @@ write_auto_update_units() {
     done
     service_tmp="$(mktemp "${service_file}.tmp.XXXXXX")" || return 1
     register_tmp "$service_tmp"
-    timer_tmp="$(mktemp "${timer_file}.tmp.XXXXXX")" || {
-        cleanup_tmp_path "$service_tmp"
-        return 1
-    }
+    timer_tmp="$(mktemp "${timer_file}.tmp.XXXXXX")" || { cleanup_tmp_path "$service_tmp"; return 1; }
     register_tmp "$timer_tmp"
     if [[ "$INSTANCE_ID" == default ]]; then
         update_command="${MANAGER_INSTALL_PATH} update"
@@ -1072,11 +1070,7 @@ write_auto_update_units() {
             "ExecStart=${update_command}" \
             'Nice=10' \
             'TimeoutStartSec=30min'
-    } >"$service_tmp" || {
-        cleanup_tmp_path "$service_tmp"
-        cleanup_tmp_path "$timer_tmp"
-        return 1
-    }
+    } >"$service_tmp" || { cleanup_tmp_path "$service_tmp" "$timer_tmp"; return 1; }
 
     {
         printf '%s\n' \
@@ -1092,24 +1086,25 @@ write_auto_update_units() {
             '' \
             '[Install]' \
             'WantedBy=timers.target'
-    } >"$timer_tmp" || {
-        cleanup_tmp_path "$service_tmp"
-        cleanup_tmp_path "$timer_tmp"
-        return 1
-    }
-    chmod 644 "$service_tmp" "$timer_tmp" || {
-        cleanup_tmp_path "$service_tmp"
-        cleanup_tmp_path "$timer_tmp"
-        return 1
-    }
-    mv -Tf -- "$service_tmp" "$service_file" || {
-        cleanup_tmp_path "$service_tmp"
-        cleanup_tmp_path "$timer_tmp"
-        return 1
-    }
+    } >"$timer_tmp" || { cleanup_tmp_path "$service_tmp" "$timer_tmp"; return 1; }
+    chmod 644 "$service_tmp" "$timer_tmp" || { cleanup_tmp_path "$service_tmp" "$timer_tmp"; return 1; }
+    mv -Tf -- "$service_tmp" "$service_file" || { cleanup_tmp_path "$service_tmp" "$timer_tmp"; return 1; }
     unregister_tmp_path "$service_tmp"
     mv -Tf -- "$timer_tmp" "$timer_file" || { cleanup_tmp_path "$timer_tmp"; return 1; }
     unregister_tmp_path "$timer_tmp"
+}
+
+reset_auto_update_transaction_flags() {
+    AUTO_UPDATE_SERVICE_EXISTED=0
+    AUTO_UPDATE_TIMER_EXISTED=0
+    AUTO_UPDATE_WAS_ENABLED=0
+    AUTO_UPDATE_WAS_ACTIVE=0
+}
+
+abort_auto_update_begin() {
+    cleanup_tmp_path "$AUTO_UPDATE_TRANSACTION_DIR"
+    AUTO_UPDATE_TRANSACTION_DIR=""
+    release_update_lock
 }
 
 begin_auto_update_transaction() {
@@ -1117,50 +1112,28 @@ begin_auto_update_transaction() {
     local timer_file="${SYSTEMD_DIR}/${AUTO_UPDATE_TIMER_NAME}"
     acquire_update_lock_wait || return 1
     load_state || { release_update_lock; return 1; }
-    AUTO_UPDATE_SERVICE_EXISTED=0
-    AUTO_UPDATE_TIMER_EXISTED=0
-    AUTO_UPDATE_WAS_ENABLED=0
-    AUTO_UPDATE_WAS_ACTIVE=0
+    reset_auto_update_transaction_flags
     make_temp_dir AUTO_UPDATE_TRANSACTION_DIR "${TMPDIR:-/tmp}" .substore-auto-update || {
         release_update_lock
         return 1
     }
     if [[ -e "$service_file" || -L "$service_file" ]]; then
-        [[ -f "$service_file" && ! -L "$service_file" ]] || {
-            cleanup_tmp_path "$AUTO_UPDATE_TRANSACTION_DIR"
-            AUTO_UPDATE_TRANSACTION_DIR=""
-            release_update_lock
+        if [[ ! -f "$service_file" || -L "$service_file" ]] || \
+            ! cp -a "$service_file" "$AUTO_UPDATE_TRANSACTION_DIR/service"; then
+            abort_auto_update_begin
             return 1
-        }
-        cp -a "$service_file" "$AUTO_UPDATE_TRANSACTION_DIR/service" || {
-            cleanup_tmp_path "$AUTO_UPDATE_TRANSACTION_DIR"
-            AUTO_UPDATE_TRANSACTION_DIR=""
-            release_update_lock
-            return 1
-        }
+        fi
         AUTO_UPDATE_SERVICE_EXISTED=1
     fi
     if [[ -e "$timer_file" || -L "$timer_file" ]]; then
-        [[ -f "$timer_file" && ! -L "$timer_file" ]] || {
-            cleanup_tmp_path "$AUTO_UPDATE_TRANSACTION_DIR"
-            AUTO_UPDATE_TRANSACTION_DIR=""
-            release_update_lock
+        if [[ ! -f "$timer_file" || -L "$timer_file" ]] || \
+            ! cp -a "$timer_file" "$AUTO_UPDATE_TRANSACTION_DIR/timer"; then
+            abort_auto_update_begin
             return 1
-        }
-        cp -a "$timer_file" "$AUTO_UPDATE_TRANSACTION_DIR/timer" || {
-            cleanup_tmp_path "$AUTO_UPDATE_TRANSACTION_DIR"
-            AUTO_UPDATE_TRANSACTION_DIR=""
-            release_update_lock
-            return 1
-        }
+        fi
         AUTO_UPDATE_TIMER_EXISTED=1
     fi
-    cp -a "$STATE_FILE" "$AUTO_UPDATE_TRANSACTION_DIR/state" || {
-        cleanup_tmp_path "$AUTO_UPDATE_TRANSACTION_DIR"
-        AUTO_UPDATE_TRANSACTION_DIR=""
-        release_update_lock
-        return 1
-    }
+    cp -a "$STATE_FILE" "$AUTO_UPDATE_TRANSACTION_DIR/state" || { abort_auto_update_begin; return 1; }
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl is-enabled "$AUTO_UPDATE_TIMER_NAME" >/dev/null 2>&1; then
             AUTO_UPDATE_WAS_ENABLED=1
@@ -1174,10 +1147,7 @@ begin_auto_update_transaction() {
 
 commit_auto_update_transaction() {
     AUTO_UPDATE_TRANSACTION_ACTIVE=0
-    AUTO_UPDATE_SERVICE_EXISTED=0
-    AUTO_UPDATE_TIMER_EXISTED=0
-    AUTO_UPDATE_WAS_ENABLED=0
-    AUTO_UPDATE_WAS_ACTIVE=0
+    reset_auto_update_transaction_flags
     release_update_lock
     cleanup_tmp_path "$AUTO_UPDATE_TRANSACTION_DIR" || \
         log_warn "自动更新事务临时备份稍后重试清理：$AUTO_UPDATE_TRANSACTION_DIR"
@@ -1230,10 +1200,7 @@ rollback_auto_update_transaction() {
     fi
     AUTO_UPDATE_TRANSACTION_DIR=""
     AUTO_UPDATE_TRANSACTION_ACTIVE=0
-    AUTO_UPDATE_SERVICE_EXISTED=0
-    AUTO_UPDATE_TIMER_EXISTED=0
-    AUTO_UPDATE_WAS_ENABLED=0
-    AUTO_UPDATE_WAS_ACTIVE=0
+    reset_auto_update_transaction_flags
     release_update_lock
     return "$result"
 }
@@ -2729,18 +2696,9 @@ create_backup() {
         assert_frontend_managed || { cleanup_tmp_path "$partial_dir"; return 1; }
         cp -a "$FRONTEND_DIR" "$partial_dir/files/frontend" || { cleanup_tmp_path "$partial_dir"; return 1; }
     fi
-    cp -a "$ENV_FILE" "$partial_dir/files/.env" || {
-        cleanup_tmp_path "$partial_dir"
-        return 1
-    }
-    cp -a "$ECOSYSTEM_FILE" "$partial_dir/files/ecosystem.config.cjs" || {
-        cleanup_tmp_path "$partial_dir"
-        return 1
-    }
-    cp -a "$STATE_FILE" "$partial_dir/files/instance.conf" || {
-        cleanup_tmp_path "$partial_dir"
-        return 1
-    }
+    cp -a "$ENV_FILE" "$partial_dir/files/.env" || { cleanup_tmp_path "$partial_dir"; return 1; }
+    cp -a "$ECOSYSTEM_FILE" "$partial_dir/files/ecosystem.config.cjs" || { cleanup_tmp_path "$partial_dir"; return 1; }
+    cp -a "$STATE_FILE" "$partial_dir/files/instance.conf" || { cleanup_tmp_path "$partial_dir"; return 1; }
     {
         printf 'install_id=%s\n' "$INSTALL_ID"
         printf 'backend_version=%s\n' "$BACKEND_VERSION"
@@ -2750,10 +2708,7 @@ create_backup() {
         printf 'include_frontend=%s\n' "$include_frontend"
     } >"$partial_dir/manifest" || { cleanup_tmp_path "$partial_dir"; return 1; }
     chmod 600 "$partial_dir/manifest" || { cleanup_tmp_path "$partial_dir"; return 1; }
-    [[ ! -f "$partial_dir/data.tar.gz" ]] || chmod 600 "$partial_dir/data.tar.gz" || {
-        cleanup_tmp_path "$partial_dir"
-        return 1
-    }
+    [[ ! -f "$partial_dir/data.tar.gz" ]] || chmod 600 "$partial_dir/data.tar.gz" || { cleanup_tmp_path "$partial_dir"; return 1; }
     mv -T -- "$partial_dir" "$backup_dir" || { cleanup_tmp_path "$partial_dir"; return 1; }
     unregister_tmp_path "$partial_dir"
     LAST_BACKUP_DIR="$backup_dir"
@@ -3084,8 +3039,7 @@ begin_env_transaction() {
     register_tmp "$STATE_TRANSACTION_BACKUP"
     if ! cp -a "$ENV_FILE" "$ENV_TRANSACTION_BACKUP" || \
         ! cp -a "$STATE_FILE" "$STATE_TRANSACTION_BACKUP"; then
-        cleanup_tmp_path "$ENV_TRANSACTION_BACKUP"
-        cleanup_tmp_path "$STATE_TRANSACTION_BACKUP"
+        cleanup_tmp_path "$ENV_TRANSACTION_BACKUP" "$STATE_TRANSACTION_BACKUP"
         ENV_TRANSACTION_BACKUP=""
         STATE_TRANSACTION_BACKUP=""
         release_update_lock
@@ -3161,8 +3115,7 @@ rollback_env_transaction() {
     fi
 
     if (( result == 0 )); then
-        cleanup_tmp_path "$ENV_TRANSACTION_BACKUP"
-        cleanup_tmp_path "$STATE_TRANSACTION_BACKUP"
+        cleanup_tmp_path "$ENV_TRANSACTION_BACKUP" "$STATE_TRANSACTION_BACKUP"
     else
         unregister_tmp_path "$ENV_TRANSACTION_BACKUP"
         unregister_tmp_path "$STATE_TRANSACTION_BACKUP"
