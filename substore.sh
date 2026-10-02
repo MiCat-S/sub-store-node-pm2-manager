@@ -93,7 +93,6 @@ DEPLOY_DIR_EXISTED=0
 PM2_CREATED_BY_TRANSACTION=0
 PM2_STATUS=""
 PM2_EXEC_PATH=""
-PM2_RESTART_FAILURE_INJECTED=0
 TMP_PATHS=()
 
 declare -a OFFICIAL_ENV_ORDER=()
@@ -170,7 +169,10 @@ require_root() {
 }
 
 require_command() {
-    command -v "$1" >/dev/null 2>&1 || die "缺少必要命令：$1"
+    local name
+    for name in "$@"; do
+        command -v "$name" >/dev/null 2>&1 || die "缺少必要命令：$name"
+    done
 }
 
 prompt() {
@@ -201,20 +203,12 @@ pause() {
     read -r -p "按 Enter 返回..." _
 }
 
-stat_mode() {
-    stat -c '%a' "$1"
-}
-
-stat_owner() {
-    stat -c '%u' "$1"
-}
-
 state_file_trusted() {
     local file="$1" mode
     [[ -f "$file" && ! -L "$file" ]] || return 1
     [[ "${SUBSTORE_MANAGER_SKIP_STATE_SECURITY:-0}" == 1 ]] && return 0
-    [[ "$(stat_owner "$file")" == 0 ]] || return 1
-    mode="$(stat_mode "$file")"
+    [[ "$(stat -c '%u' "$file")" == 0 ]] || return 1
+    mode="$(stat -c '%a' "$file")"
     [[ "$mode" == 600 || "$mode" == 400 ]]
 }
 
@@ -402,10 +396,6 @@ frontend_marker_path() {
 manager_marker_matches() {
     local marker="$1"
     [[ -f "$marker" && ! -L "$marker" ]] && grep -Fxq "$INSTALL_ID" "$marker"
-}
-
-write_frontend_marker() {
-    write_manager_marker "$(frontend_marker_path)"
 }
 
 write_manager_marker() {
@@ -873,7 +863,7 @@ repair_missing_frontend_marker() {
         return 1
     fi
 
-    write_frontend_marker || {
+    write_manager_marker "$(frontend_marker_path)" || {
         log_error "实例的前端管理标记恢复失败：$FRONTEND_DIR"
         return 1
     }
@@ -1364,8 +1354,7 @@ warn_insecure_cors_wildcard() {
 }
 
 repair_managed_installation() {
-    require_command flock
-    require_command realpath
+    require_command flock realpath
     acquire_manager_lock_wait
     acquire_update_lock_wait
     load_state || { release_update_lock; release_manager_lock; die "实例状态不存在"; }
@@ -1775,15 +1764,17 @@ stop_instance() {
     esac
 }
 
+inject_test_failure_once() {
+    # 仅测试模式：SUBSTORE_MANAGER_TEST_FAIL_<名称>_ONCE=1 时让对应步骤失败一次
+    local flag="SUBSTORE_MANAGER_TEST_FAIL_${1}_ONCE" injected="${1}_FAILURE_INJECTED"
+    [[ "${SUBSTORE_MANAGER_TESTING:-0}" == 1 && "${!flag:-0}" == 1 && "${!injected:-0}" == 0 ]] || return 1
+    printf -v "$injected" "%s" 1
+    log_warn "$2"
+}
+
 restart_instance() {
     local persist="${1:-1}"
-    if [[ "${SUBSTORE_MANAGER_TESTING:-0}" == 1 && \
-        "${SUBSTORE_MANAGER_TEST_FAIL_PM2_RESTART_ONCE:-0}" == 1 && \
-        "$PM2_RESTART_FAILURE_INJECTED" == 0 ]]; then
-        PM2_RESTART_FAILURE_INJECTED=1
-        log_warn "测试模式：注入一次 PM2 重启失败"
-        return 1
-    fi
+    inject_test_failure_once PM2_RESTART "测试模式：注入一次 PM2 重启失败" && return 1
     load_pm2_process_info || return 1
     if [[ "$PM2_STATUS" == missing ]]; then
         pm2 start "$ECOSYSTEM_FILE" --only "$PM2_NAME" >/dev/null || return 1
@@ -1905,13 +1896,7 @@ wait_for_health() {
     url="http://$(health_host):${PORT}$(health_path)"
     node_bin="$(node_command)"
 
-    if [[ "${SUBSTORE_MANAGER_TESTING:-0}" == 1 && \
-        "${SUBSTORE_MANAGER_TEST_FAIL_HEALTH_ONCE:-0}" == 1 && \
-        "${HEALTH_FAILURE_INJECTED:-0}" == 0 ]]; then
-        HEALTH_FAILURE_INJECTED=1
-        log_warn "测试模式：注入一次健康检查失败"
-        return 1
-    fi
+    inject_test_failure_once HEALTH "测试模式：注入一次健康检查失败" && return 1
 
     while (( SECONDS < deadline )); do
         if port_in_use "$PORT"; then
@@ -2089,11 +2074,7 @@ prepare_system_tools() {
     require_root
     detect_os
     ensure_base_packages
-    require_command sha256sum
-    require_command ss
-    require_command unzip
-    require_command flock
-    require_command realpath
+    require_command sha256sum ss unzip flock realpath
 }
 
 prepare_managed_runtime() {
@@ -2108,10 +2089,7 @@ prepare_managed_runtime() {
         save_state || die "保存新的 Node 路径失败"
         log_warn "状态文件中的 Node 路径不可用，已修复为：$NODE_BIN"
     fi
-    require_command pm2
-    require_command curl
-    require_command ss
-    require_command flock
+    require_command pm2 curl ss flock
 }
 
 prepare_pm2_control_runtime() {
@@ -2124,9 +2102,7 @@ prepare_pm2_control_runtime() {
 
 prepare_update_tools() {
     ensure_base_packages
-    require_command sha256sum
-    require_command unzip
-    require_command tar
+    require_command sha256sum unzip tar
 }
 
 install_manager_command() {
@@ -2280,7 +2256,7 @@ new_install() {
 
     install_backend_file "$backend_stage" || die "后端文件写入失败"
     mkdir -p "$FRONTEND_DIR"
-    write_frontend_marker
+    write_manager_marker "$(frontend_marker_path)"
     cp -a "$frontend_stage"/. "$FRONTEND_DIR"/
     [[ -f "$FRONTEND_DIR/index.html" ]] || die "前端文件写入失败"
     write_initial_env "$magic_path" "$cors_allowed_origins"
@@ -2546,7 +2522,7 @@ import_existing() {
     write_manager_marker "$MARKER_FILE" || die "写入实例管理标记失败"
     mkdir -p -- "$DATA_DIR" "${DEPLOY_DIR}/backups"
     write_manager_marker "${DATA_DIR}/.substore-manager-data" || die "写入数据目录管理标记失败"
-    write_frontend_marker
+    write_manager_marker "$(frontend_marker_path)"
     write_ecosystem
     save_state
     IMPORT_TRANSACTION_ACTIVE=0
@@ -3416,7 +3392,7 @@ modify_official_env() {
             rollback_env_transaction || log_error "恢复 Env 事务失败"
             return
         fi
-        write_frontend_marker || { rollback_env_transaction; return; }
+        write_manager_marker "$(frontend_marker_path)" || { rollback_env_transaction; return; }
         value="$FRONTEND_DIR"
     fi
     env_set "$ENV_FILE" "$key" "$value" || { rollback_env_transaction; return; }
@@ -3706,10 +3682,6 @@ start_or_restart_managed_instance() {
     release_update_lock
 }
 
-start_managed_instance() {
-    start_or_restart_managed_instance start
-}
-
 stop_managed_instance() {
     require_root
     require_command flock
@@ -3721,10 +3693,6 @@ stop_managed_instance() {
         return 1
     fi
     release_update_lock
-}
-
-restart_managed_instance() {
-    start_or_restart_managed_instance restart
 }
 
 auto_update_units_owned() {
@@ -4002,9 +3970,9 @@ EOF
         case "$(prompt '请选择')" in
             1) install_or_import; pause ;;
             2) update_instance; pause ;;
-            3) start_managed_instance; pause ;;
+            3) start_or_restart_managed_instance start; pause ;;
             4) stop_managed_instance; pause ;;
-            5) restart_managed_instance; pause ;;
+            5) start_or_restart_managed_instance restart; pause ;;
             6) show_status; pause ;;
             7) show_logs ;;
             8) change_port; pause ;;
@@ -4047,9 +4015,9 @@ main() {
         menu) manager_menu ;;
         install) install_or_import ;;
         update) update_instance ;;
-        start) start_managed_instance ;;
+        start) start_or_restart_managed_instance start ;;
         stop) stop_managed_instance ;;
-        restart) restart_managed_instance ;;
+        restart) start_or_restart_managed_instance restart ;;
         status) load_state && show_status ;;
         logs) load_state && show_logs ;;
         port) require_root; change_port "${2:-}" ;;
