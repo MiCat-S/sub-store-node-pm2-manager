@@ -335,6 +335,11 @@ managed_state_files() {
     find "${STATE_BASE}/instances" -mindepth 2 -maxdepth 2 -name instance.conf -type f -print 2>/dev/null || true
 }
 
+# 在子 shell 中读取另一个已通过 state_file_trusted 校验的状态文件，每个字段输出一行
+read_state_fields() {
+    bash -c 'set -u; source "$1"; shift; for name in "$@"; do printf "%s\n" "${!name:-}"; done' _ "$@"
+}
+
 managed_path_conflicts_elsewhere() {
     local candidate state_path existing
     candidate="$(normalize_path "$1")"
@@ -351,11 +356,7 @@ managed_path_conflicts_elsewhere() {
                 log_error "路径与其他管理实例冲突：$candidate <-> $existing"
                 return 0
             fi
-        done < <(bash -c '
-set -u
-source "$1"
-printf "%s\n%s\n%s\n" "${DEPLOY_DIR:-}" "${DATA_DIR:-}" "${FRONTEND_DIR:-}"
-' _ "$state_path")
+        done < <(read_state_fields "$state_path" DEPLOY_DIR DATA_DIR FRONTEND_DIR)
     done < <(managed_state_files)
     return 1
 }
@@ -377,11 +378,7 @@ assert_identity_not_managed_elsewhere() {
     while IFS= read -r state_path; do
         [[ -n "$state_path" && "$state_path" != "$STATE_FILE" ]] || continue
         state_file_trusted "$state_path" || die "发现不可信的实例状态文件：$state_path"
-        values="$(bash -c '
-set -u
-source "$1"
-printf "%s\n%s\n" "${PM2_NAME:-}" "${PORT:-}"
-' _ "$state_path")"
+        values="$(read_state_fields "$state_path" PM2_NAME PORT)"
         other_pm2="${values%%$'\n'*}"
         other_port="${values#*$'\n'}"
         [[ "$PM2_NAME" != "$other_pm2" ]] || die "PM2 名称已被其他管理实例使用：$PM2_NAME"
@@ -1497,22 +1494,28 @@ verify_download() {
     esac
 }
 
+# 下载 Release 资产并校验大小与 SHA-256；参数：URL DIGEST SIZE 目标文件
+fetch_release_asset() {
+    http_download "$1" "$4"
+    verify_download "$4" "$2" "$3"
+}
+
+bundle_version_matches() {
+    grep -Fqx "// SUB_STORE_BACKEND_VERSION: $2" < <(head -n 1 "$1")
+}
+
 download_backend_release() {
     local destination="$1"
     release_info "$BACKEND_REPO" "$BACKEND_ASSET"
     BACKEND_LATEST="$RELEASE_TAG"
-    http_download "$RELEASE_URL" "$destination"
-    verify_download "$destination" "$RELEASE_DIGEST" "$RELEASE_SIZE"
-    grep -Fqx "// SUB_STORE_BACKEND_VERSION: ${BACKEND_LATEST}" < <(head -n 1 "$destination") || \
-        die "后端 bundle 内嵌版本与 Release tag 不一致"
+    fetch_release_asset "$RELEASE_URL" "$RELEASE_DIGEST" "$RELEASE_SIZE" "$destination"
+    bundle_version_matches "$destination" "$BACKEND_LATEST" || die "后端 bundle 内嵌版本与 Release tag 不一致"
 }
 
 download_frontend_release() {
-    local destination="$1"
     release_info "$FRONTEND_REPO" "$FRONTEND_ASSET"
     FRONTEND_LATEST="$RELEASE_TAG"
-    http_download "$RELEASE_URL" "$destination"
-    verify_download "$destination" "$RELEASE_DIGEST" "$RELEASE_SIZE"
+    fetch_release_asset "$RELEASE_URL" "$RELEASE_DIGEST" "$RELEASE_SIZE" "$1"
 }
 
 extract_frontend() {
@@ -2248,11 +2251,7 @@ pm2_name_managed_elsewhere() {
         [[ -n "$state_path" ]] || continue
         [[ "$state_path" == "$STATE_FILE" ]] && continue
         state_file_trusted "$state_path" || die "发现不可信的实例状态文件：$state_path"
-        other_name="$(bash -c '
-set -u
-source "$1"
-printf "%s" "${PM2_NAME:-}"
-' _ "$state_path")"
+        other_name="$(read_state_fields "$state_path" PM2_NAME)"
         [[ "$other_name" != "$candidate" ]] || return 0
     done < <(managed_state_files)
     return 1
@@ -2355,6 +2354,14 @@ NODE
     cleanup_tmp_path "$pm2_json"
 }
 
+# 确认导入时管理器将写入的标记与 PM2 配置路径均未被占用；确认前后各调用一次，第二次在持锁后防 TOCTOU
+assert_import_targets_unclaimed() {
+    local reason="$1" path
+    for path in "${DATA_DIR}/.substore-manager-data" "$(frontend_marker_path)" "$MARKER_FILE" "$ECOSYSTEM_FILE"; do
+        [[ ! -e "$path" && ! -L "$path" ]] || die "${reason}：$path"
+    done
+}
+
 import_existing() {
     local instances="${1:-}" line count selected name file cwd interpreter value existing_status
     prepare_system_tools
@@ -2409,13 +2416,7 @@ import_existing() {
     assert_identity_not_managed_elsewhere
     [[ -d "$DATA_DIR" ]] || die "现有数据目录不存在：$DATA_DIR"
     [[ -f "$FRONTEND_DIR/index.html" ]] || die "现有前端目录没有 index.html：$FRONTEND_DIR"
-    [[ ! -e "${DATA_DIR}/.substore-manager-data" && ! -L "${DATA_DIR}/.substore-manager-data" ]] || \
-        die "数据目录已存在管理标记，拒绝覆盖：$DATA_DIR"
-    [[ ! -e "$(frontend_marker_path)" && ! -L "$(frontend_marker_path)" ]] || \
-        die "前端目录已存在管理标记，拒绝覆盖：$FRONTEND_DIR"
-    [[ ! -e "$MARKER_FILE" && ! -L "$MARKER_FILE" ]] || die "部署目录已存在管理标记：$MARKER_FILE"
-    [[ ! -e "$ECOSYSTEM_FILE" && ! -L "$ECOSYSTEM_FILE" ]] || \
-        die "管理器 PM2 配置路径已存在：$ECOSYSTEM_FILE"
+    assert_import_targets_unclaimed "管理标记或管理器 PM2 配置已存在，拒绝覆盖"
     INSTALL_ID="$(random_hex 16)"
     CREATED_BY_MANAGER=0
     DATA_CREATED_BY_MANAGER=0
@@ -2440,14 +2441,7 @@ import_existing() {
     [[ -d "$DATA_DIR" && ! -L "$DATA_DIR" ]] || die "现有数据目录不存在或不安全：$DATA_DIR"
     [[ -f "$FRONTEND_DIR/index.html" && ! -L "$FRONTEND_DIR" ]] || \
         die "现有前端目录不存在或不安全：$FRONTEND_DIR"
-    [[ ! -e "${DATA_DIR}/.substore-manager-data" && ! -L "${DATA_DIR}/.substore-manager-data" ]] || \
-        die "数据目录在导入确认后出现管理标记：$DATA_DIR"
-    [[ ! -e "$(frontend_marker_path)" && ! -L "$(frontend_marker_path)" ]] || \
-        die "前端目录在导入确认后出现管理标记：$FRONTEND_DIR"
-    [[ ! -e "$MARKER_FILE" && ! -L "$MARKER_FILE" ]] || \
-        die "部署目录在导入确认后出现管理标记：$MARKER_FILE"
-    [[ ! -e "$ECOSYSTEM_FILE" && ! -L "$ECOSYSTEM_FILE" ]] || \
-        die "管理器 PM2 配置在导入确认后被占用：$ECOSYSTEM_FILE"
+    assert_import_targets_unclaimed "管理标记或管理器 PM2 配置在导入确认后被占用"
     load_pm2_process_info || die "无法重新读取待导入 PM2 实例"
     assert_pm2_target "$PM2_EXEC_PATH" || die "PM2 入口在导入确认后发生变化"
     existing_status="$PM2_STATUS"
@@ -2874,6 +2868,7 @@ apply_staged_update() {
 update_instance() {
     local stage backend_stage frontend_zip frontend_stage need_backend=0 need_frontend=0
     local original_status
+    local -a backend_release frontend_release
     require_root
     load_state || die "尚未安装或导入 Sub-Store"
     require_command flock
@@ -2897,14 +2892,10 @@ update_instance() {
     BACKEND_VERSION="$(backend_version_from_file "$BACKEND_FILE" || printf 'unknown')"
     release_info "$BACKEND_REPO" "$BACKEND_ASSET"
     BACKEND_LATEST="$RELEASE_TAG"
-    BACKEND_RELEASE_URL="$RELEASE_URL"
-    BACKEND_RELEASE_DIGEST="$RELEASE_DIGEST"
-    BACKEND_RELEASE_SIZE="$RELEASE_SIZE"
+    backend_release=("$RELEASE_URL" "$RELEASE_DIGEST" "$RELEASE_SIZE")
     release_info "$FRONTEND_REPO" "$FRONTEND_ASSET"
     FRONTEND_LATEST="$RELEASE_TAG"
-    FRONTEND_RELEASE_URL="$RELEASE_URL"
-    FRONTEND_RELEASE_DIGEST="$RELEASE_DIGEST"
-    FRONTEND_RELEASE_SIZE="$RELEASE_SIZE"
+    frontend_release=("$RELEASE_URL" "$RELEASE_DIGEST" "$RELEASE_SIZE")
 
     [[ "$BACKEND_VERSION" == "$BACKEND_LATEST" ]] || need_backend=1
     [[ "$FRONTEND_VERSION" == "$FRONTEND_LATEST" ]] || need_frontend=1
@@ -2926,14 +2917,11 @@ update_instance() {
     frontend_zip="${stage}/${FRONTEND_ASSET}"
     frontend_stage="${stage}/frontend"
     if (( need_backend )); then
-        http_download "$BACKEND_RELEASE_URL" "$backend_stage"
-        verify_download "$backend_stage" "$BACKEND_RELEASE_DIGEST" "$BACKEND_RELEASE_SIZE"
-        grep -Fqx "// SUB_STORE_BACKEND_VERSION: ${BACKEND_LATEST}" < <(head -n 1 "$backend_stage") || \
-            die "后端 bundle 版本校验失败"
+        fetch_release_asset "${backend_release[@]}" "$backend_stage"
+        bundle_version_matches "$backend_stage" "$BACKEND_LATEST" || die "后端 bundle 版本校验失败"
     fi
     if (( need_frontend )); then
-        http_download "$FRONTEND_RELEASE_URL" "$frontend_zip"
-        verify_download "$frontend_zip" "$FRONTEND_RELEASE_DIGEST" "$FRONTEND_RELEASE_SIZE"
+        fetch_release_asset "${frontend_release[@]}" "$frontend_zip"
         extract_frontend "$frontend_zip" "$frontend_stage"
     fi
 
@@ -3788,7 +3776,8 @@ validate_uninstall_preconditions() {
 }
 
 uninstall_instance() {
-    local remove_data=0 data_marker frontend_marker original_status answer
+    local remove_data=0 original_status answer path note
+    local -a uninstall_paths=() notes=()
     require_root
     load_state || die "尚未安装或导入 Sub-Store"
     printf '将卸载 PM2 实例：%s\n部署目录：%s\n前端目录：%s\n数据目录：%s\n备份目录：%s\n' \
@@ -3819,38 +3808,30 @@ uninstall_instance() {
     fi
 
     if [[ "$CREATED_BY_MANAGER" == 1 ]]; then
-        stage_uninstall_path_or_rollback "$BACKEND_FILE"
-        stage_uninstall_path_or_rollback "$ENV_FILE"
-        stage_uninstall_path_or_rollback "$ECOSYSTEM_FILE"
+        uninstall_paths=("$BACKEND_FILE" "$ENV_FILE" "$ECOSYSTEM_FILE")
         if [[ "$FRONTEND_CREATED_BY_MANAGER" == 1 ]]; then
-            stage_uninstall_path_or_rollback "$FRONTEND_DIR"
+            uninstall_paths+=("$FRONTEND_DIR")
         else
-            frontend_marker="$(frontend_marker_path)"
-            stage_uninstall_path_or_rollback "$frontend_marker"
-            log_info "自定义或预先存在的前端目录已保留：$FRONTEND_DIR"
+            uninstall_paths+=("$(frontend_marker_path)")
+            notes+=("自定义或预先存在的前端目录已保留：$FRONTEND_DIR")
         fi
         if (( remove_data )); then
-            stage_uninstall_path_or_rollback "$DATA_DIR"
-            stage_uninstall_path_or_rollback "${DEPLOY_DIR}/backups"
-        elif [[ -d "${DEPLOY_DIR}/backups" ]]; then
-            data_marker="${DATA_DIR}/.substore-manager-data"
-            stage_uninstall_path_or_rollback "$data_marker"
-            log_info "数据未删除，更新备份也已保留：${DEPLOY_DIR}/backups"
+            uninstall_paths+=("$DATA_DIR" "${DEPLOY_DIR}/backups")
         else
-            data_marker="${DATA_DIR}/.substore-manager-data"
-            stage_uninstall_path_or_rollback "$data_marker"
+            uninstall_paths+=("${DATA_DIR}/.substore-manager-data")
+            [[ ! -d "${DEPLOY_DIR}/backups" ]] || notes+=("数据未删除，更新备份也已保留：${DEPLOY_DIR}/backups")
         fi
-        stage_uninstall_path_or_rollback "$MARKER_FILE"
     else
-        frontend_marker="$(frontend_marker_path)"
-        data_marker="${DATA_DIR}/.substore-manager-data"
-        stage_uninstall_path_or_rollback "$ECOSYSTEM_FILE"
-        stage_uninstall_path_or_rollback "$frontend_marker"
-        stage_uninstall_path_or_rollback "$data_marker"
-        stage_uninstall_path_or_rollback "$MARKER_FILE"
-        log_info "导入实例的程序、Env、前端和数据均已保留"
+        uninstall_paths=("$ECOSYSTEM_FILE" "$(frontend_marker_path)" "${DATA_DIR}/.substore-manager-data")
+        notes+=("导入实例的程序、Env、前端和数据均已保留")
     fi
-    stage_uninstall_path_or_rollback "$STATE_FILE"
+    uninstall_paths+=("$MARKER_FILE" "$STATE_FILE")
+    for path in "${uninstall_paths[@]}"; do
+        stage_uninstall_path_or_rollback "$path"
+    done
+    for note in "${notes[@]}"; do
+        log_info "$note"
+    done
     commit_uninstall_transaction
     rmdir -- "$DEPLOY_DIR" 2>/dev/null || true
     rmdir -- "$STATE_ROOT" 2>/dev/null || true
