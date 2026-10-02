@@ -97,7 +97,6 @@ TMP_PATHS=()
 declare -a OFFICIAL_ENV_ORDER=()
 declare -A ENV_DESC=()
 declare -A ENV_DEFAULT=()
-declare -A ENV_DEFAULT_LABEL=()
 declare -A ENV_TYPE=()
 declare -A ENV_SENSITIVE=()
 
@@ -421,146 +420,54 @@ assert_frontend_managed() {
     fi
 }
 
+# 官方 Env 目录，每行：名称 类型 是否敏感 官方默认值（- 表示未设置） 用途
 init_env_catalog() {
-    OFFICIAL_ENV_ORDER=(
-        SUB_STORE_BACKEND_API_PORT
-        SUB_STORE_BACKEND_API_HOST
-        SUB_STORE_DATA_BASE_PATH
-        SUB_STORE_FRONTEND_PATH
-        SUB_STORE_BACKEND_MERGE
-        SUB_STORE_BACKEND_PREFIX
-        SUB_STORE_FRONTEND_BACKEND_PATH
-        SUB_STORE_FRONTEND_PORT
-        SUB_STORE_FRONTEND_HOST
-        SUB_STORE_MAX_HEADER_SIZE
-        SUB_STORE_BODY_JSON_LIMIT
-        SUB_STORE_CORS_ALLOWED_ORIGINS
-        SUB_STORE_BACKEND_DEFAULT_PROXY
-        SUB_STORE_PUSH_SERVICE
-        SUB_STORE_BACKEND_SYNC_CRON
-        SUB_STORE_BACKEND_DOWNLOAD_CRON
-        SUB_STORE_BACKEND_UPLOAD_CRON
-        SUB_STORE_PRODUCE_CRON
-        SUB_STORE_MMDB_COUNTRY_PATH
-        SUB_STORE_MMDB_COUNTRY_URL
-        SUB_STORE_MMDB_ASN_PATH
-        SUB_STORE_MMDB_ASN_URL
-        SUB_STORE_MMDB_CRON
-        SUB_STORE_DATA_URL
-        SUB_STORE_DATA_URL_POST
-        SUB_STORE_BACKEND_CUSTOM_NAME
-        SUB_STORE_BACKEND_CUSTOM_ICON
-        SUB_STORE_X_POWERED_BY
-    )
-
-    ENV_DESC[SUB_STORE_BACKEND_API_PORT]="Node 后端监听端口"
-    ENV_DESC[SUB_STORE_BACKEND_API_HOST]="Node 后端监听地址"
-    ENV_DESC[SUB_STORE_DATA_BASE_PATH]="root.json、sub-store.json 等持久化数据目录"
-    ENV_DESC[SUB_STORE_FRONTEND_PATH]="前端 dist 内容所在目录"
-    ENV_DESC[SUB_STORE_BACKEND_MERGE]="让后端端口同时提供 API 与前端静态资源；启用时只设置 true"
-    ENV_DESC[SUB_STORE_BACKEND_PREFIX]="让裸后端路由也使用 FRONTEND_BACKEND_PATH 前缀；启用时只设置 true"
-    ENV_DESC[SUB_STORE_FRONTEND_BACKEND_PATH]="前端访问后端使用的路径前缀，必须以 / 开头"
-    ENV_DESC[SUB_STORE_FRONTEND_PORT]="非合并模式的独立前端监听端口"
-    ENV_DESC[SUB_STORE_FRONTEND_HOST]="非合并模式的独立前端监听地址"
-    ENV_DESC[SUB_STORE_MAX_HEADER_SIZE]="undici 响应头大小上限，单位字节"
-    ENV_DESC[SUB_STORE_BODY_JSON_LIMIT]="JSON 请求体大小上限，例如 1mb、10mb"
-    ENV_DESC[SUB_STORE_CORS_ALLOWED_ORIGINS]="Node 后端 CORS allowlist，多个 Origin 用逗号分隔"
-    ENV_DESC[SUB_STORE_BACKEND_DEFAULT_PROXY]="后端默认 SOCKS5、HTTP 或 HTTPS 代理"
-    ENV_DESC[SUB_STORE_PUSH_SERVICE]="推送服务 URL，支持占位符 [推送标题] 与 [推送内容]"
-    ENV_DESC[SUB_STORE_BACKEND_SYNC_CRON]="定时同步订阅/文件的五段 cron 表达式"
-    ENV_DESC[SUB_STORE_BACKEND_DOWNLOAD_CRON]="定时从 Gist 恢复全部配置"
-    ENV_DESC[SUB_STORE_BACKEND_UPLOAD_CRON]="定时向 Gist 备份全部配置"
-    ENV_DESC[SUB_STORE_PRODUCE_CRON]="定时处理订阅，格式 cron,sub|col,名称；多个任务用分号连接"
-    ENV_DESC[SUB_STORE_MMDB_COUNTRY_PATH]="GeoLite2 Country MMDB 本地路径"
-    ENV_DESC[SUB_STORE_MMDB_COUNTRY_URL]="GeoLite2 Country MMDB 下载地址"
-    ENV_DESC[SUB_STORE_MMDB_ASN_PATH]="GeoLite2 ASN MMDB 本地路径"
-    ENV_DESC[SUB_STORE_MMDB_ASN_URL]="GeoLite2 ASN MMDB 下载地址"
-    ENV_DESC[SUB_STORE_MMDB_CRON]="定时更新 MMDB 的五段 cron 表达式"
-    ENV_DESC[SUB_STORE_DATA_URL]="启动时下载并恢复远程数据的 URL"
-    ENV_DESC[SUB_STORE_DATA_URL_POST]="远程数据下载后的 JavaScript 修改表达式"
-    ENV_DESC[SUB_STORE_BACKEND_CUSTOM_NAME]="前端显示的自定义后端名称"
-    ENV_DESC[SUB_STORE_BACKEND_CUSTOM_ICON]="前端显示的自定义后端图标 URL"
-    ENV_DESC[SUB_STORE_X_POWERED_BY]="响应头 X-Powered-By 的值"
-
-    ENV_DEFAULT[SUB_STORE_BACKEND_API_PORT]="3000"
-    ENV_DEFAULT[SUB_STORE_BACKEND_API_HOST]="::"
-    ENV_DEFAULT[SUB_STORE_DATA_BASE_PATH]="."
-    ENV_DEFAULT[SUB_STORE_FRONTEND_PATH]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_BACKEND_MERGE]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_BACKEND_PREFIX]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_FRONTEND_BACKEND_PATH]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_FRONTEND_PORT]="3001"
-    ENV_DEFAULT[SUB_STORE_FRONTEND_HOST]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_MAX_HEADER_SIZE]="32768"
-    ENV_DEFAULT[SUB_STORE_BODY_JSON_LIMIT]="1mb"
-    ENV_DEFAULT[SUB_STORE_CORS_ALLOWED_ORIGINS]="$OFFICIAL_CORS_DEFAULT"
-    ENV_DEFAULT[SUB_STORE_BACKEND_DEFAULT_PROXY]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_PUSH_SERVICE]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_BACKEND_SYNC_CRON]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_BACKEND_DOWNLOAD_CRON]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_BACKEND_UPLOAD_CRON]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_PRODUCE_CRON]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_MMDB_COUNTRY_PATH]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_MMDB_COUNTRY_URL]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_MMDB_ASN_PATH]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_MMDB_ASN_URL]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_MMDB_CRON]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_DATA_URL]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_DATA_URL_POST]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_BACKEND_CUSTOM_NAME]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_BACKEND_CUSTOM_ICON]="__UNSET__"
-    ENV_DEFAULT[SUB_STORE_X_POWERED_BY]="Sub-Store"
-
-    ENV_DEFAULT_LABEL[SUB_STORE_FRONTEND_HOST]="继承 SUB_STORE_BACKEND_API_HOST，否则 ::"
-    ENV_DEFAULT_LABEL[SUB_STORE_FRONTEND_PATH]="未设置"
-    ENV_DEFAULT_LABEL[SUB_STORE_BACKEND_MERGE]="未设置"
-    ENV_DEFAULT_LABEL[SUB_STORE_BACKEND_PREFIX]="未设置"
-    ENV_DEFAULT_LABEL[SUB_STORE_FRONTEND_BACKEND_PATH]="未设置"
-
-    ENV_TYPE[SUB_STORE_BACKEND_API_PORT]="port"
-    ENV_TYPE[SUB_STORE_BACKEND_API_HOST]="host"
-    ENV_TYPE[SUB_STORE_DATA_BASE_PATH]="abs_path"
-    ENV_TYPE[SUB_STORE_FRONTEND_PATH]="abs_path"
-    ENV_TYPE[SUB_STORE_BACKEND_MERGE]="truthy"
-    ENV_TYPE[SUB_STORE_BACKEND_PREFIX]="truthy"
-    ENV_TYPE[SUB_STORE_FRONTEND_BACKEND_PATH]="prefix"
-    ENV_TYPE[SUB_STORE_FRONTEND_PORT]="port"
-    ENV_TYPE[SUB_STORE_FRONTEND_HOST]="host"
-    ENV_TYPE[SUB_STORE_MAX_HEADER_SIZE]="positive_int"
-    ENV_TYPE[SUB_STORE_BODY_JSON_LIMIT]="body_limit"
-    ENV_TYPE[SUB_STORE_CORS_ALLOWED_ORIGINS]="cors"
-    ENV_TYPE[SUB_STORE_BACKEND_DEFAULT_PROXY]="proxy"
-    ENV_TYPE[SUB_STORE_PUSH_SERVICE]="text"
-    ENV_TYPE[SUB_STORE_BACKEND_SYNC_CRON]="cron"
-    ENV_TYPE[SUB_STORE_BACKEND_DOWNLOAD_CRON]="cron"
-    ENV_TYPE[SUB_STORE_BACKEND_UPLOAD_CRON]="cron"
-    ENV_TYPE[SUB_STORE_PRODUCE_CRON]="produce_cron"
-    ENV_TYPE[SUB_STORE_MMDB_COUNTRY_PATH]="abs_path"
-    ENV_TYPE[SUB_STORE_MMDB_COUNTRY_URL]="url"
-    ENV_TYPE[SUB_STORE_MMDB_ASN_PATH]="abs_path"
-    ENV_TYPE[SUB_STORE_MMDB_ASN_URL]="url"
-    ENV_TYPE[SUB_STORE_MMDB_CRON]="cron"
-    ENV_TYPE[SUB_STORE_DATA_URL]="url"
-    ENV_TYPE[SUB_STORE_DATA_URL_POST]="text"
-    ENV_TYPE[SUB_STORE_BACKEND_CUSTOM_NAME]="text"
-    ENV_TYPE[SUB_STORE_BACKEND_CUSTOM_ICON]="url"
-    ENV_TYPE[SUB_STORE_X_POWERED_BY]="text"
-
-    ENV_SENSITIVE[SUB_STORE_PUSH_SERVICE]=1
-    ENV_SENSITIVE[SUB_STORE_DATA_URL]=1
-    ENV_SENSITIVE[SUB_STORE_DATA_URL_POST]=1
-    ENV_SENSITIVE[SUB_STORE_FRONTEND_BACKEND_PATH]=1
+    local key type sensitive default desc
+    OFFICIAL_ENV_ORDER=()
+    while read -r key type sensitive default desc; do
+        [[ -n "$key" && "$key" != \#* ]] || continue
+        OFFICIAL_ENV_ORDER+=("$key")
+        ENV_TYPE[$key]="$type"
+        ENV_DESC[$key]="$desc"
+        [[ "$default" == - ]] || ENV_DEFAULT[$key]="$default"
+        [[ "$sensitive" == 0 ]] || ENV_SENSITIVE[$key]=1
+    done <<EOF
+SUB_STORE_BACKEND_API_PORT        port          0 3000                   Node 后端监听端口
+SUB_STORE_BACKEND_API_HOST        host          0 ::                     Node 后端监听地址
+SUB_STORE_DATA_BASE_PATH          abs_path      0 .                      root.json、sub-store.json 等持久化数据目录
+SUB_STORE_FRONTEND_PATH           abs_path      0 -                      前端 dist 内容所在目录
+SUB_STORE_BACKEND_MERGE           truthy        0 -                      让后端端口同时提供 API 与前端静态资源；启用时只设置 true
+SUB_STORE_BACKEND_PREFIX          truthy        0 -                      让裸后端路由也使用 FRONTEND_BACKEND_PATH 前缀；启用时只设置 true
+SUB_STORE_FRONTEND_BACKEND_PATH   prefix        1 -                      前端访问后端使用的路径前缀，必须以 / 开头
+SUB_STORE_FRONTEND_PORT           port          0 3001                   非合并模式的独立前端监听端口
+SUB_STORE_FRONTEND_HOST           host          0 -                      非合并模式的独立前端监听地址
+SUB_STORE_MAX_HEADER_SIZE         positive_int  0 32768                  undici 响应头大小上限，单位字节
+SUB_STORE_BODY_JSON_LIMIT         body_limit    0 1mb                    JSON 请求体大小上限，例如 1mb、10mb
+SUB_STORE_CORS_ALLOWED_ORIGINS    cors          0 $OFFICIAL_CORS_DEFAULT Node 后端 CORS allowlist，多个 Origin 用逗号分隔
+SUB_STORE_BACKEND_DEFAULT_PROXY   proxy         0 -                      后端默认 SOCKS5、HTTP 或 HTTPS 代理
+SUB_STORE_PUSH_SERVICE            text          1 -                      推送服务 URL，支持占位符 [推送标题] 与 [推送内容]
+SUB_STORE_BACKEND_SYNC_CRON       cron          0 -                      定时同步订阅/文件的五段 cron 表达式
+SUB_STORE_BACKEND_DOWNLOAD_CRON   cron          0 -                      定时从 Gist 恢复全部配置
+SUB_STORE_BACKEND_UPLOAD_CRON     cron          0 -                      定时向 Gist 备份全部配置
+SUB_STORE_PRODUCE_CRON            produce_cron  0 -                      定时处理订阅，格式 cron,sub|col,名称；多个任务用分号连接
+SUB_STORE_MMDB_COUNTRY_PATH       abs_path      0 -                      GeoLite2 Country MMDB 本地路径
+SUB_STORE_MMDB_COUNTRY_URL        url           0 -                      GeoLite2 Country MMDB 下载地址
+SUB_STORE_MMDB_ASN_PATH           abs_path      0 -                      GeoLite2 ASN MMDB 本地路径
+SUB_STORE_MMDB_ASN_URL            url           0 -                      GeoLite2 ASN MMDB 下载地址
+SUB_STORE_MMDB_CRON               cron          0 -                      定时更新 MMDB 的五段 cron 表达式
+SUB_STORE_DATA_URL                url           1 -                      启动时下载并恢复远程数据的 URL
+SUB_STORE_DATA_URL_POST           text          1 -                      远程数据下载后的 JavaScript 修改表达式
+SUB_STORE_BACKEND_CUSTOM_NAME     text          0 -                      前端显示的自定义后端名称
+SUB_STORE_BACKEND_CUSTOM_ICON     url           0 -                      前端显示的自定义后端图标 URL
+SUB_STORE_X_POWERED_BY            text          0 Sub-Store              响应头 X-Powered-By 的值
+EOF
 }
 
 official_env_default_label() {
-    local key="$1" value
-    value="${ENV_DEFAULT[$key]:-__UNSET__}"
-    if [[ -n "${ENV_DEFAULT_LABEL[$key]:-}" ]]; then
-        printf '%s' "${ENV_DEFAULT_LABEL[$key]}"
-    elif [[ "$value" == __UNSET__ ]]; then
-        printf '%s' "未设置"
+    if [[ "$1" == SUB_STORE_FRONTEND_HOST ]]; then
+        printf '%s' '继承 SUB_STORE_BACKEND_API_HOST，否则 ::'
     else
-        printf '%s' "$value"
+        printf '%s' "${ENV_DEFAULT[$1]:-未设置}"
     fi
 }
 
@@ -3309,7 +3216,7 @@ reset_official_env() {
     local key default
     select_official_env || { log_warn "无效编号"; return; }
     key="$SELECTED_ENV"
-    default="${ENV_DEFAULT[$key]}"
+    default="${ENV_DEFAULT[$key]:-}"
     printf '%s 的官方默认值：%s\n' "$key" "$(official_env_default_label "$key")"
     if [[ "$key" == SUB_STORE_DATA_BASE_PATH ]]; then
         log_error "官方默认值 . 依赖工作目录，不适合持久化管理实例；请保留或修改为绝对路径"
@@ -3320,7 +3227,7 @@ reset_official_env() {
         change_port 3000
         return
     fi
-    if [[ "$default" == __UNSET__ ]]; then
+    if [[ -z "$default" ]]; then
         run_env_transaction env_delete "$ENV_FILE" "$key"
     else
         run_env_transaction env_set "$ENV_FILE" "$key" "$default"

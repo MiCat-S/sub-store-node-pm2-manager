@@ -38,8 +38,8 @@ grep -Rho 'SUB_STORE_BACKEND_CUSTOM_\(NAME\|ICON\)' "$frontend_dir/src" \
     | sort -u >>"$TMP_ROOT/source-env.txt"
 sort -u -o "$TMP_ROOT/source-env.txt" "$TMP_ROOT/source-env.txt"
 
-sed -n '/OFFICIAL_ENV_ORDER=(/,/^    )/p' "$ROOT/substore.sh" \
-    | grep -o 'SUB_STORE_[A-Z0-9_]*' \
+sed -n '/^init_env_catalog() {/,/^}/p' "$ROOT/substore.sh" \
+    | grep -o '^SUB_STORE_[A-Z0-9_]*' \
     | sort -u >"$TMP_ROOT/manager-env.txt"
 
 if ! diff -u "$TMP_ROOT/source-env.txt" "$TMP_ROOT/manager-env.txt"; then
