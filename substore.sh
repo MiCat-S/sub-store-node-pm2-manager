@@ -641,18 +641,21 @@ mask_value() {
     fi
 }
 
-env_get() {
-    local file="$1" key="$2" node_bin
-    [[ -f "$file" ]] || return 1
-    node_bin="$(node_command)"
-    "$node_bin" - "$file" "$key" <<'NODE'
+# 管理器使用的 Node.js 辅助命令：.env 读写、PM2 jlist 解析、Release 元数据与健康检查
+IFS= read -r -d '' NODE_TOOL <<'NODE' || true
 const fs = require('fs');
-const [file, key] = process.argv.slice(2);
-const source = fs.readFileSync(file, 'utf8').split(/\r?\n/);
-for (let i = source.length - 1; i >= 0; i -= 1) {
-  const match = source[i].match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-  if (!match || match[1] !== key) continue;
-  let value = match[2].trim();
+const path = require('path');
+const [command, ...args] = process.argv.slice(1);
+const ENV_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/;
+const ENV_KEY = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/;
+
+const readLines = file => fs.readFileSync(file, 'utf8').split(/\r?\n/);
+const trimEnd = lines => {
+  while (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+};
+const envValue = raw => {
+  let value = raw.trim();
   if (value.startsWith('"') && value.endsWith('"')) {
     try { value = JSON.parse(value); } catch {}
   } else if (value.startsWith("'") && value.endsWith("'")) {
@@ -660,96 +663,217 @@ for (let i = source.length - 1; i >= 0; i -= 1) {
   } else {
     value = value.replace(/\s+#.*$/, '').trim();
   }
-  process.stdout.write(value);
-  process.exit(0);
-}
-process.exit(1);
+  return value;
+};
+const envEntries = file => readLines(file)
+  .map(line => line.match(ENV_LINE))
+  .filter(Boolean)
+  .map(match => [match[1], envValue(match[2])]);
+const writeAtomic = (file, text) => {
+  const temp = `${file}.tmp.${process.pid}`;
+  try {
+    fs.writeFileSync(temp, text, { mode: 0o600 });
+    fs.renameSync(temp, file);
+    fs.chmodSync(file, 0o600);
+  } finally {
+    try { fs.unlinkSync(temp); } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+};
+const readJsonStdin = callback => {
+  let input = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', chunk => { input += chunk; });
+  process.stdin.on('end', () => callback(JSON.parse(input)));
+};
+
+const commands = {
+  'env-get'(file, key) {
+    const entry = envEntries(file).filter(([name]) => name === key).pop();
+    if (!entry) process.exit(1);
+    process.stdout.write(entry[1]);
+  },
+  'env-list'(file) {
+    for (const [key, value] of envEntries(file)) {
+      process.stdout.write(`${key}\t${value.replace(/[\t\r\n]/g, ' ')}\n`);
+    }
+  },
+  'env-set'(file, key, value) {
+    const entry = `${key}=${JSON.stringify(value)}`;
+    const next = [];
+    let replaced = false;
+    for (const line of readLines(file)) {
+      if (line.match(ENV_KEY)?.[1] !== key) {
+        next.push(line);
+      } else if (!replaced) {
+        next.push(entry);
+        replaced = true;
+      }
+    }
+    trimEnd(next);
+    if (!replaced) next.push(entry);
+    writeAtomic(file, `${next.join('\n')}\n`);
+  },
+  'env-delete'(file, key) {
+    const next = readLines(file).filter(line => line.match(ENV_KEY)?.[1] !== key);
+    writeAtomic(file, `${trimEnd(next).join('\n')}\n`);
+  },
+  'env-init'(file, port, host, magicPath, frontendDir, dataDir, corsAllowedOrigins) {
+    const values = {
+      SUB_STORE_BACKEND_API_PORT: port,
+      SUB_STORE_BACKEND_API_HOST: host,
+      SUB_STORE_BACKEND_MERGE: 'true',
+      SUB_STORE_FRONTEND_BACKEND_PATH: magicPath,
+      SUB_STORE_FRONTEND_PATH: frontendDir,
+      SUB_STORE_DATA_BASE_PATH: dataDir
+    };
+    if (corsAllowedOrigins) values.SUB_STORE_CORS_ALLOWED_ORIGINS = corsAllowedOrigins;
+    writeAtomic(file, Object.entries(values)
+      .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+      .join('\n') + '\n');
+  },
+  ecosystem(file, name, script, cwd, interpreter) {
+    const config = {
+      apps: [{
+        name,
+        script,
+        cwd,
+        interpreter,
+        exec_mode: 'fork',
+        instances: 1,
+        autorestart: true,
+        watch: false,
+        restart_delay: 3000,
+        kill_timeout: 10000,
+        time: true
+      }]
+    };
+    writeAtomic(file, `module.exports = ${JSON.stringify(config, null, 2)};\n`);
+  },
+  release(file, assetName) {
+    const release = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const asset = (release.assets || []).find(item => item.name === assetName);
+    if (!release.tag_name) throw new Error('latest release has no tag_name');
+    if (!asset) throw new Error(`release ${release.tag_name} has no ${assetName}`);
+    process.stdout.write(`${release.tag_name}\n`);
+    process.stdout.write(`${asset.browser_download_url}\n`);
+    process.stdout.write(`${asset.digest || ''}\n`);
+    process.stdout.write(`${String(asset.size || '')}\n`);
+  },
+  health(file, expected) {
+    try {
+      const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const value = payload?.data || payload;
+      if (payload?.status && payload.status !== 'success') process.exit(1);
+      if (value.backend !== 'Node') process.exit(1);
+      if (expected && value.version !== expected) process.exit(1);
+    } catch {
+      process.exit(1);
+    }
+  },
+  'pm2-info'(name) {
+    readJsonStdin(list => {
+      const apps = list.filter(app => app.name === name);
+      if (apps.length === 0) {
+        process.stdout.write('missing\n');
+        return;
+      }
+      const statuses = [...new Set(apps.map(app => app.pm2_env?.status || 'unknown'))];
+      const paths = [...new Set(apps.map(app => app.pm2_env?.pm_exec_path).filter(Boolean))];
+      process.stdout.write(`${statuses.length === 1 ? statuses[0] : 'mixed'}\n`);
+      process.stdout.write(paths.length === 1 ? paths[0] : '__multiple__');
+    });
+  },
+  'pm2-env'(name, key) {
+    readJsonStdin(list => {
+      const value = list.find(item => item.name === name)?.pm2_env?.[key];
+      if (value == null || value === '') process.exit(1);
+      process.stdout.write(String(value));
+    });
+  },
+  'pm2-discover'() {
+    readJsonStdin(list => {
+      const seen = new Set();
+      for (const app of list) {
+        const file = app.pm2_env?.pm_exec_path || '';
+        if (!/sub-store\.bundle\.js$/.test(file)) continue;
+        const key = `${app.name}\t${file}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const fields = [
+          app.name,
+          file,
+          app.pm2_env?.pm_cwd || '',
+          app.pm2_env?.exec_interpreter || 'node'
+        ];
+        if (fields.some(value => /[\t\r\n]/.test(String(value)))) {
+          throw new Error(`PM2 process ${app.name} contains unsupported control characters`);
+        }
+        process.stdout.write(fields.join('\t') + '\n');
+      }
+    });
+  },
+  'pm2-import-check'(envFile, name, expectedCwd, expectedInterpreter, expectedScript) {
+    readJsonStdin(list => {
+      const apps = list.filter(app => app.name === name);
+      if (apps.length !== 1) throw new Error(`expected exactly one PM2 process named ${name}`);
+      const app = apps[0];
+      const actualCwd = app.pm2_env?.pm_cwd || path.dirname(app.pm2_env?.pm_exec_path || '');
+      if (path.resolve(actualCwd) !== path.resolve(expectedCwd)) {
+        throw new Error('PM2 cwd changed during import');
+      }
+      if (path.resolve(app.pm2_env?.pm_exec_path || '') !== path.resolve(expectedScript)) {
+        throw new Error('PM2 script changed during import');
+      }
+      const actualInterpreter = app.pm2_env?.exec_interpreter || 'node';
+      if (actualInterpreter !== 'node' && path.resolve(actualInterpreter) !== path.resolve(expectedInterpreter)) {
+        throw new Error('PM2 interpreter changed during import');
+      }
+      const env = {};
+      for (const [key, value] of envEntries(envFile)) env[key] = value;
+      for (const [key, value] of Object.entries(app.pm2_env || {})) {
+        if (!key.startsWith('SUB_STORE_') || value == null || value === '') continue;
+        if (!(key in env) || env[key] !== String(value)) {
+          throw new Error(`${key} in PM2 overrides or differs from .env`);
+        }
+      }
+      const runArgs = app.pm2_env?.args;
+      const nodeArgs = app.pm2_env?.node_args;
+      if ((Array.isArray(runArgs) ? runArgs.length : Boolean(runArgs)) ||
+          (Array.isArray(nodeArgs) ? nodeArgs.length : Boolean(nodeArgs))) {
+        throw new Error('PM2 args or node_args are not supported for safe import');
+      }
+    });
+  }
+};
+
+commands[command](...args);
 NODE
+
+node_tool() {
+    "$(node_command)" -e "$NODE_TOOL" -- "$@"
+}
+
+env_get() {
+    [[ -f "$1" ]] || return 1
+    node_tool env-get "$1" "$2"
 }
 
 env_set() {
-    local file="$1" key="$2" value="$3" node_bin
-    mkdir -p -- "$(dirname -- "$file")" || return 1
-    touch "$file" || return 1
-    node_bin="$(node_command)"
-    "$node_bin" - "$file" "$key" "$value" <<'NODE'
-const fs = require('fs');
-const [file, key, value] = process.argv.slice(2);
-const newline = `${key}=${JSON.stringify(value)}`;
-const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
-let replaced = false;
-const next = [];
-for (const line of lines) {
-  const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/);
-  if (match?.[1] === key) {
-    if (!replaced) next.push(newline);
-    replaced = true;
-  } else {
-    next.push(line);
-  }
-}
-while (next.length && next[next.length - 1] === '') next.pop();
-if (!replaced) next.push(newline);
-const temp = `${file}.tmp.${process.pid}`;
-try {
-  fs.writeFileSync(temp, `${next.join('\n')}\n`, { mode: 0o600 });
-  fs.renameSync(temp, file);
-  fs.chmodSync(file, 0o600);
-} finally {
-  try { fs.unlinkSync(temp); } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-}
-NODE
+    mkdir -p -- "$(dirname -- "$1")" || return 1
+    touch "$1" || return 1
+    node_tool env-set "$1" "$2" "$3"
 }
 
 env_delete() {
-    local file="$1" key="$2" node_bin
-    [[ -f "$file" ]] || return 0
-    node_bin="$(node_command)"
-    "$node_bin" - "$file" "$key" <<'NODE'
-const fs = require('fs');
-const [file, key] = process.argv.slice(2);
-const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
-const next = lines.filter(line => {
-  const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/);
-  return match?.[1] !== key;
-});
-while (next.length && next[next.length - 1] === '') next.pop();
-const temp = `${file}.tmp.${process.pid}`;
-try {
-  fs.writeFileSync(temp, `${next.join('\n')}\n`, { mode: 0o600 });
-  fs.renameSync(temp, file);
-  fs.chmodSync(file, 0o600);
-} finally {
-  try { fs.unlinkSync(temp); } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-}
-NODE
+    [[ -f "$1" ]] || return 0
+    node_tool env-delete "$1" "$2"
 }
 
 env_list() {
-    local file="$1" node_bin
-    [[ -f "$file" ]] || return 0
-    node_bin="$(node_command)"
-    "$node_bin" - "$file" <<'NODE'
-const fs = require('fs');
-const [file] = process.argv.slice(2);
-for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-  const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-  if (!match) continue;
-  let value = match[2].trim();
-  if (value.startsWith('"') && value.endsWith('"')) {
-    try { value = JSON.parse(value); } catch {}
-  } else if (value.startsWith("'") && value.endsWith("'")) {
-    value = value.slice(1, -1);
-  } else {
-    value = value.replace(/\s+#.*$/, '').trim();
-  }
-  process.stdout.write(`${match[1]}\t${value.replace(/[\t\r\n]/g, ' ')}\n`);
-}
-NODE
+    [[ -f "$1" ]] || return 0
+    node_tool env-list "$1"
 }
 
 save_state() {
@@ -1430,7 +1554,7 @@ acquire_manager_lock_wait() { lock_acquire MANAGER wait; }
 release_manager_lock() { lock_release MANAGER; }
 
 release_info() {
-    local repo="$1" asset="$2" json_file parsed_file node_bin
+    local repo="$1" asset="$2" json_file parsed_file
     local -a release_fields=()
     json_file="$(mktemp)"
     register_tmp "$json_file"
@@ -1442,27 +1566,12 @@ release_info() {
         --header "X-GitHub-Api-Version: 2022-11-28" \
         --output "$json_file" \
         "${GITHUB_API_BASE}/repos/${repo}/releases/latest"
-    node_bin="$(node_command)"
-    if ! "$node_bin" - "$json_file" "$asset" >"$parsed_file" <<'NODE'
-const fs = require('fs');
-const [file, assetName] = process.argv.slice(2);
-const release = JSON.parse(fs.readFileSync(file, 'utf8'));
-const asset = (release.assets || []).find(item => item.name === assetName);
-if (!release.tag_name) throw new Error('latest release has no tag_name');
-if (!asset) throw new Error(`release ${release.tag_name} has no ${assetName}`);
-process.stdout.write(`${release.tag_name}\n`);
-process.stdout.write(`${asset.browser_download_url}\n`);
-process.stdout.write(`${asset.digest || ''}\n`);
-process.stdout.write(`${String(asset.size || '')}\n`);
-NODE
-    then
-        cleanup_tmp_path "$json_file"
-        cleanup_tmp_path "$parsed_file"
+    if ! node_tool release "$json_file" "$asset" >"$parsed_file"; then
+        cleanup_tmp_path "$json_file" "$parsed_file"
         die "GitHub Release 元数据解析失败：${repo}/${asset}"
     fi
     mapfile -t release_fields <"$parsed_file"
-    cleanup_tmp_path "$json_file"
-    cleanup_tmp_path "$parsed_file"
+    cleanup_tmp_path "$json_file" "$parsed_file"
     [[ "${#release_fields[@]}" == 4 ]] || die "GitHub Release 元数据字段不完整：${repo}/${asset}"
     RELEASE_TAG="${release_fields[0]}"
     RELEASE_URL="${release_fields[1]}"
@@ -1555,44 +1664,11 @@ install_backend_file() {
 }
 
 write_ecosystem() {
-    local node_bin
     [[ ! -L "$ECOSYSTEM_FILE" ]] || {
         log_error "PM2 配置不能是符号链接：$ECOSYSTEM_FILE"
         return 1
     }
-    node_bin="$(node_command)"
-    if ! "$node_bin" - "$ECOSYSTEM_FILE" "$PM2_NAME" "$BACKEND_FILE" "$DEPLOY_DIR" "$NODE_BIN" <<'NODE'
-const fs = require('fs');
-const [file, name, script, cwd, interpreter] = process.argv.slice(2);
-const config = {
-  apps: [{
-    name,
-    script,
-    cwd,
-    interpreter,
-    exec_mode: 'fork',
-    instances: 1,
-    autorestart: true,
-    watch: false,
-    restart_delay: 3000,
-    kill_timeout: 10000,
-    time: true
-  }]
-};
-const temp = `${file}.tmp.${process.pid}`;
-try {
-  fs.writeFileSync(temp, `module.exports = ${JSON.stringify(config, null, 2)};\n`, { mode: 0o600 });
-  fs.renameSync(temp, file);
-  fs.chmodSync(file, 0o600);
-} finally {
-  try { fs.unlinkSync(temp); } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-}
-NODE
-    then
-        return 1
-    fi
+    node_tool ecosystem "$ECOSYSTEM_FILE" "$PM2_NAME" "$BACKEND_FILE" "$DEPLOY_DIR" "$NODE_BIN"
 }
 
 load_pm2_process_info() {
@@ -1601,24 +1677,7 @@ load_pm2_process_info() {
         log_error "无法读取 PM2 进程列表"
         return 2
     fi
-    # shellcheck disable=SC2016
-    if ! info="$(printf '%s' "$process_json" | "$(node_command)" -e '
-let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => input += chunk);
-process.stdin.on("end", () => {
-  const name = process.argv[1];
-  const apps = JSON.parse(input).filter(app => app.name === name);
-  if (apps.length === 0) {
-    process.stdout.write("missing\n");
-    return;
-  }
-  const statuses = [...new Set(apps.map(app => app.pm2_env?.status || "unknown"))];
-  const paths = [...new Set(apps.map(app => app.pm2_env?.pm_exec_path).filter(Boolean))];
-  process.stdout.write(`${statuses.length === 1 ? statuses[0] : "mixed"}\n`);
-  process.stdout.write(paths.length === 1 ? paths[0] : "__multiple__");
-});
-' "$PM2_NAME")"; then
+    if ! info="$(printf '%s' "$process_json" | node_tool pm2-info "$PM2_NAME")"; then
         log_error "PM2 进程列表解析失败"
         return 2
     fi
@@ -1640,19 +1699,7 @@ pm2_process_status() {
 }
 
 pm2_env_get() {
-    local key="$1"
-    pm2 jlist 2>/dev/null | "$(node_command)" -e '
-let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => input += chunk);
-process.stdin.on("end", () => {
-  const [name, key] = process.argv.slice(1);
-  const app = JSON.parse(input).find(item => item.name === name);
-  const value = app?.pm2_env?.[key];
-  if (value == null || value === "") process.exit(1);
-  process.stdout.write(String(value));
-});
-' "$PM2_NAME" "$key"
+    pm2 jlist 2>/dev/null | node_tool pm2-env "$PM2_NAME" "$1"
 }
 
 pm2_process_matches_instance() {
@@ -1839,12 +1886,11 @@ health_path() {
 }
 
 wait_for_health() {
-    local expected_version="${1:-}" deadline response_file url node_bin port_status
+    local expected_version="${1:-}" deadline response_file url port_status
     deadline=$((SECONDS + 45))
     response_file="$(mktemp)"
     register_tmp "$response_file"
     url="http://$(health_host):${PORT}$(health_path)"
-    node_bin="$(node_command)"
 
     inject_test_failure_once HEALTH "测试模式：注入一次健康检查失败" && return 1
 
@@ -1879,20 +1925,7 @@ wait_for_health() {
 
     while (( SECONDS < deadline )); do
         if curl --noproxy '*' --fail --silent --show-error --max-time 5 "$url" -o "$response_file" 2>/dev/null && \
-            "$node_bin" - "$response_file" "$expected_version" <<'NODE'
-const fs = require('fs');
-const [file, expected] = process.argv.slice(2);
-try {
-  const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const value = payload?.data || payload;
-  if (payload?.status && payload.status !== 'success') process.exit(1);
-  if (value.backend !== 'Node') process.exit(1);
-  if (expected && value.version !== expected) process.exit(1);
-} catch {
-  process.exit(1);
-}
-NODE
-        then
+            node_tool health "$response_file" "$expected_version"; then
             log_info "健康检查通过：$url"
             cleanup_tmp_path "$response_file"
             return 0
@@ -1905,38 +1938,9 @@ NODE
 }
 
 write_initial_env() {
-    local magic_path="$1" cors_allowed_origins="${2:-}" node_bin
+    local magic_path="$1" cors_allowed_origins="${2:-}"
     [[ ! -L "$ENV_FILE" ]] || return 1
-    node_bin="$(node_command)"
-    if ! "$node_bin" - "$ENV_FILE" "$PORT" "$HOST" "$magic_path" "$FRONTEND_DIR" "$DATA_DIR" "$cors_allowed_origins" <<'NODE'
-const fs = require('fs');
-const [file, port, host, magicPath, frontendDir, dataDir, corsAllowedOrigins] = process.argv.slice(2);
-const values = {
-  SUB_STORE_BACKEND_API_PORT: port,
-  SUB_STORE_BACKEND_API_HOST: host,
-  SUB_STORE_BACKEND_MERGE: 'true',
-  SUB_STORE_FRONTEND_BACKEND_PATH: magicPath,
-  SUB_STORE_FRONTEND_PATH: frontendDir,
-  SUB_STORE_DATA_BASE_PATH: dataDir
-};
-if (corsAllowedOrigins) values.SUB_STORE_CORS_ALLOWED_ORIGINS = corsAllowedOrigins;
-const temp = `${file}.tmp.${process.pid}`;
-try {
-  const source = Object.entries(values)
-    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
-    .join('\n') + '\n';
-  fs.writeFileSync(temp, source, { mode: 0o600 });
-  fs.renameSync(temp, file);
-  fs.chmodSync(file, 0o600);
-} finally {
-  try { fs.unlinkSync(temp); } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-}
-NODE
-    then
-        return 1
-    fi
+    node_tool env-init "$ENV_FILE" "$PORT" "$HOST" "$magic_path" "$FRONTEND_DIR" "$DATA_DIR" "$cors_allowed_origins"
 }
 
 resolve_config_path() {
@@ -2259,32 +2263,7 @@ pm2_name_managed_elsewhere() {
 
 discover_pm2_instances() {
     local raw line name
-    # shellcheck disable=SC2016
-    if ! raw="$(pm2 jlist 2>/dev/null | "$(node_command)" -e '
-let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => input += chunk);
-process.stdin.on("end", () => {
-  const seen = new Set();
-  for (const app of JSON.parse(input)) {
-    const file = app.pm2_env?.pm_exec_path || "";
-    if (!/sub-store\.bundle\.js$/.test(file)) continue;
-    const key = `${app.name}\t${file}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const fields = [
-      app.name,
-      file,
-      app.pm2_env?.pm_cwd || "",
-      app.pm2_env?.exec_interpreter || "node"
-    ];
-    if (fields.some(value => /[\t\r\n]/.test(String(value)))) {
-      throw new Error(`PM2 process ${app.name} contains unsupported control characters`);
-    }
-    process.stdout.write(fields.join("\t") + "\n");
-  }
-});
-')"; then
+    if ! raw="$(pm2 jlist 2>/dev/null | node_tool pm2-discover)"; then
         log_error "无法读取或解析 PM2 进程列表"
         return 1
     fi
@@ -2296,62 +2275,13 @@ process.stdin.on("end", () => {
 }
 
 validate_import_pm2_compatibility() {
-    local pm2_json node_bin
-    pm2_json="$(mktemp)" || return 1
-    register_tmp "$pm2_json"
-    pm2 jlist >"$pm2_json" 2>/dev/null || { cleanup_tmp_path "$pm2_json"; return 1; }
-    node_bin="$(node_command)"
-    if ! "$node_bin" - "$pm2_json" "$ENV_FILE" "$PM2_NAME" "$DEPLOY_DIR" "$NODE_BIN" "$BACKEND_FILE" <<'NODE'
-const fs = require('fs');
-const path = require('path');
-const [pm2File, envFile, name, expectedCwd, expectedInterpreter, expectedScript] = process.argv.slice(2);
-const apps = JSON.parse(fs.readFileSync(pm2File, 'utf8')).filter(app => app.name === name);
-if (apps.length !== 1) throw new Error(`expected exactly one PM2 process named ${name}`);
-const app = apps[0];
-const actualCwd = app.pm2_env?.pm_cwd || path.dirname(app.pm2_env?.pm_exec_path || '');
-if (path.resolve(actualCwd) !== path.resolve(expectedCwd)) {
-  throw new Error('PM2 cwd changed during import');
-}
-if (path.resolve(app.pm2_env?.pm_exec_path || '') !== path.resolve(expectedScript)) {
-  throw new Error('PM2 script changed during import');
-}
-const actualInterpreter = app.pm2_env?.exec_interpreter || 'node';
-if (actualInterpreter !== 'node' && path.resolve(actualInterpreter) !== path.resolve(expectedInterpreter)) {
-  throw new Error('PM2 interpreter changed during import');
-}
-const env = {};
-for (const line of fs.readFileSync(envFile, 'utf8').split(/\r?\n/)) {
-  const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-  if (!match) continue;
-  let value = match[2].trim();
-  if (value.startsWith('"') && value.endsWith('"')) {
-    try { value = JSON.parse(value); } catch {}
-  } else if (value.startsWith("'") && value.endsWith("'")) {
-    value = value.slice(1, -1);
-  } else {
-    value = value.replace(/\s+#.*$/, '').trim();
-  }
-  env[match[1]] = value;
-}
-for (const [key, value] of Object.entries(app.pm2_env || {})) {
-  if (!key.startsWith('SUB_STORE_') || value == null || value === '') continue;
-  if (!(key in env) || env[key] !== String(value)) {
-    throw new Error(`${key} in PM2 overrides or differs from .env`);
-  }
-}
-const args = app.pm2_env?.args;
-const nodeArgs = app.pm2_env?.node_args;
-if ((Array.isArray(args) ? args.length : Boolean(args)) ||
-    (Array.isArray(nodeArgs) ? nodeArgs.length : Boolean(nodeArgs))) {
-  throw new Error('PM2 args or node_args are not supported for safe import');
-}
-NODE
-    then
-        cleanup_tmp_path "$pm2_json"
+    local pm2_json
+    pm2_json="$(pm2 jlist 2>/dev/null)" || return 1
+    if ! printf '%s' "$pm2_json" | node_tool pm2-import-check \
+        "$ENV_FILE" "$PM2_NAME" "$DEPLOY_DIR" "$NODE_BIN" "$BACKEND_FILE"; then
         log_error "现有 PM2 实例包含未持久化 Env 或额外启动参数，无法安全导入"
         return 1
     fi
-    cleanup_tmp_path "$pm2_json"
 }
 
 # 确认导入时管理器将写入的标记与 PM2 配置路径均未被占用；确认前后各调用一次，第二次在持锁后防 TOCTOU
