@@ -336,7 +336,7 @@ managed_state_files() {
 
 # 在子 shell 中读取另一个已通过 state_file_trusted 校验的状态文件，每个字段输出一行
 read_state_fields() {
-    bash -c 'set -u; source "$1"; shift; for name in "$@"; do printf "%s\n" "${!name:-}"; done' _ "$@"
+    bash -c 'set -u; source "$1"; shift; for __substore_field in "$@"; do printf "%s\n" "${!__substore_field:-}"; done' _ "$@"
 }
 
 managed_path_conflicts_elsewhere() {
