@@ -60,7 +60,6 @@ HOST=""
 BACKEND_VERSION=""
 FRONTEND_VERSION=""
 NODE_BIN=""
-INSTALLED_AT=""
 AUTO_UPDATE_ENABLED=0
 AUTO_UPDATE_INTERVAL_MINUTES=60
 BACKUP_RETENTION_COUNT=10
@@ -579,7 +578,7 @@ official_env_default_label() {
 }
 
 validate_env_value() {
-    local key="$1" value="$2" type item cron_part kind name
+    local key="$1" value="$2" type item cron_part kind name origins jobs
     type="${ENV_TYPE[$key]:-text}"
     [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
 
@@ -685,7 +684,6 @@ env_set() {
     local file="$1" key="$2" value="$3" node_bin
     mkdir -p -- "$(dirname -- "$file")" || return 1
     touch "$file" || return 1
-    chmod 600 "$file" || return 1
     node_bin="$(node_command)"
     "$node_bin" - "$file" "$key" "$value" <<'NODE'
 const fs = require('fs');
@@ -789,7 +787,6 @@ save_state() {
         BACKEND_VERSION "$BACKEND_VERSION"
         FRONTEND_VERSION "$FRONTEND_VERSION"
         NODE_BIN "$NODE_BIN"
-        INSTALLED_AT "$INSTALLED_AT"
         AUTO_UPDATE_ENABLED "$AUTO_UPDATE_ENABLED"
         AUTO_UPDATE_INTERVAL_MINUTES "$AUTO_UPDATE_INTERVAL_MINUTES"
         BACKUP_RETENTION_COUNT "$BACKUP_RETENTION_COUNT"
@@ -987,7 +984,6 @@ ensure_node() {
         return 0
     fi
 
-    [[ "${SUBSTORE_MANAGER_SKIP_NODE_INSTALL:-0}" != 1 ]] || die "测试模式禁止安装 Node.js"
     official_version="$(official_node_version)"
     node_major="${official_version%%.*}"
     setup_script="$(mktemp)"
@@ -1658,7 +1654,6 @@ NODE
     then
         return 1
     fi
-    chmod 600 "$ECOSYSTEM_FILE" || return 1
 }
 
 load_pm2_process_info() {
@@ -2262,7 +2257,6 @@ new_install() {
     else
         FRONTEND_CREATED_BY_MANAGER=1
     fi
-    INSTALLED_AT="$(date -Iseconds)"
     NODE_BIN="$(command -v node)"
 
     stage_parent="$(dirname -- "$DEPLOY_DIR")"
@@ -2503,7 +2497,6 @@ import_existing() {
     CREATED_BY_MANAGER=0
     DATA_CREATED_BY_MANAGER=0
     FRONTEND_CREATED_BY_MANAGER=0
-    INSTALLED_AT="$(date -Iseconds)"
     BACKEND_VERSION="$(backend_version_from_file "$BACKEND_FILE" || printf 'unknown')"
     FRONTEND_VERSION="unknown"
 
@@ -2799,7 +2792,6 @@ create_backup() {
         printf 'data_dir=%s\n' "$DATA_DIR"
         printf 'include_backend=%s\n' "$include_backend"
         printf 'include_frontend=%s\n' "$include_frontend"
-        printf 'created_at=%s\n' "$(date -Iseconds)"
     } >"$partial_dir/manifest" || { cleanup_tmp_path "$partial_dir"; return 1; }
     chmod 600 "$partial_dir/manifest" || { cleanup_tmp_path "$partial_dir"; return 1; }
     [[ ! -f "$partial_dir/data.tar.gz" ]] || chmod 600 "$partial_dir/data.tar.gz" || {
@@ -3906,7 +3898,7 @@ validate_uninstall_preconditions() {
 }
 
 uninstall_instance() {
-    local remove_data=0 data_marker frontend_marker original_status
+    local remove_data=0 data_marker frontend_marker original_status answer
     require_root
     load_state || die "尚未安装或导入 Sub-Store"
     printf '将卸载 PM2 实例：%s\n部署目录：%s\n前端目录：%s\n数据目录：%s\n备份目录：%s\n' \
